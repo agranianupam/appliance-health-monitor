@@ -1,966 +1,726 @@
-
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Activity,
   AlertTriangle,
   CheckCircle2,
   Clock3,
   Cpu,
-  Gauge,
   Radio,
-  RefreshCw,
   ShieldCheck,
+  ShieldAlert,
   Thermometer,
   Waves,
   Zap,
+  Sliders,
+  BellOff,
+  Bell,
+  Power,
+  RotateCcw,
+  Layers,
+  Unlock,
+  Info
 } from 'lucide-react';
-
 import {
-  CartesianGrid,
-  Line,
-  LineChart,
   ResponsiveContainer,
-  Tooltip,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
+  CartesianGrid,
+  Tooltip
 } from 'recharts';
 
-import { getEvents, getHistory, getLatest } from './services/api';
+const MQTT_BROKER = import.meta.env.VITE_MQTT_BROKER || 'broker.hivemq.com';
+const MQTT_PORT = import.meta.env.VITE_MQTT_PORT || '8000';
+const MQTT_PROTOCOL = import.meta.env.VITE_MQTT_PROTOCOL || 'ws';
+const MQTT_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || 'fanmon_x7k29q4';
+const MQTT_USER = import.meta.env.VITE_MQTT_USERNAME || '';
+const MQTT_PASS = import.meta.env.VITE_MQTT_PASSWORD || '';
 
-const stateClass = (state = 'Awaiting data') => {
-  if (state === 'Normal') return 'good';
-  if (state === 'Early Abnormality') return 'watch';
-  if (state === 'Maintenance Recommended') return 'warn';
-  if (state === 'Critical' || state === 'Sensor Fault') return 'critical';
-  return 'neutral';
-};
-
-const fmt = (value, digits = 2) =>
-  Number.isFinite(Number(value))
-    ? Number(value).toFixed(digits)
-    : '—';
-
-function MetricCard({
-  icon: Icon,
-  title,
-  value,
-  unit,
-  description,
-  tone,
-}) {
-  return (
-    <article className={`metric-card ${tone}`}>
-      <div className="metric-top">
-        <span className="metric-icon">
-          <Icon size={19} />
-        </span>
-        <span className="metric-live">
-          <span /> LIVE FEED
-        </span>
-      </div>
-
-      <p className="metric-label">{title}</p>
-
-      <div className="metric-value">
-        {value}
-        <span>{unit}</span>
-      </div>
-
-      <p className="metric-description">{description}</p>
-    </article>
-  );
-}
-
-function TrendChart({ history }) {
-  const data = useMemo(
-    () =>
-      history.map((row) => ({
-        ...row,
-        time: row.created_at
-          ? new Date(row.created_at).toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })
-          : `#${row.id}`,
-      })),
-    [history]
-  );
+function CircularGauge({ value, min = 0, max = 100, unit = '', label, color = '#38c8ee', threshold = null }) {
+  const radius = 42;
+  const circumference = 2 * Math.PI * radius;
+  const hasValue = Number.isFinite(value);
+  const clampedVal = hasValue ? Math.min(Math.max(value, min), max) : min;
+  const percent = hasValue ? (clampedVal - min) / (max - min) : 0;
+  const strokeDashoffset = circumference - percent * circumference * 0.75;
 
   return (
-    <div className="chart-wrap">
-      {data.length < 2 ? (
-        <div className="chart-empty">
-          <Activity size={24} />
-          <span>
-            Waiting for more readings to draw a trend
+    <div className="gauge-box">
+      <div className="gauge-svg-wrap">
+        <svg viewBox="0 0 100 100" className="gauge-svg">
+          <circle
+            cx="50" cy="50" r={radius}
+            className="gauge-bg"
+            strokeDasharray={`${circumference * 0.75} ${circumference * 0.25}`}
+            strokeDashoffset={0}
+            transform="rotate(135 50 50)"
+          />
+          <circle
+            cx="50" cy="50" r={radius}
+            className="gauge-val"
+            stroke={hasValue ? color : '#334155'}
+            strokeDasharray={`${circumference * 0.75} ${circumference * 0.25}`}
+            strokeDashoffset={strokeDashoffset}
+            transform="rotate(135 50 50)"
+          />
+        </svg>
+        <div className="gauge-center">
+          <span className="gauge-num" style={{ color: hasValue ? color : '#64748b' }}>
+            {hasValue ? value : '-'}
           </span>
+          {hasValue && <span className="gauge-unit">{unit}</span>}
         </div>
-      ) : (
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart
-            data={data}
-            margin={{
-              top: 12,
-              right: 12,
-              left: -16,
-              bottom: 4,
-            }}
-          >
-            <CartesianGrid
-              stroke="#233047"
-              strokeDasharray="4 5"
-            />
-
-            <XAxis
-              dataKey="time"
-              tick={{ fill: '#8190a8', fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              minTickGap={28}
-            />
-
-            <YAxis
-              yAxisId="temp"
-              tick={{ fill: '#8190a8', fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-            />
-
-            <YAxis
-              yAxisId="current"
-              orientation="right"
-              tick={{ fill: '#8190a8', fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-            />
-
-            <Tooltip
-              contentStyle={{
-                background: '#101a2b',
-                border: '1px solid #2a3850',
-                borderRadius: 10,
-                color: '#eaf0fb',
-              }}
-            />
-
-            <Line
-              yAxisId="temp"
-              type="monotone"
-              dataKey="temperature_c"
-              name="Temperature °C"
-              stroke="#36c5f0"
-              strokeWidth={2.5}
-              dot={false}
-              isAnimationActive={false}
-            />
-
-            <Line
-              yAxisId="current"
-              type="monotone"
-              dataKey="current_rms_a"
-              name="Current A"
-              stroke="#b69cff"
-              strokeWidth={2.2}
-              dot={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      )}
+      </div>
+      <div className="gauge-info">
+        <strong>{label}</strong>
+        {threshold && <small>Limit: {threshold}{unit}</small>}
+      </div>
     </div>
   );
 }
 
 export default function App() {
-  const [reading, setReading] = useState(null);
-  const [history, setHistory] = useState([]);
+  const [mqttClient, setMqttClient] = useState(null);
+  const [brokerConnected, setBrokerConnected] = useState(false);
+  const [discoveredDevices, setDiscoveredDevices] = useState(['fan-01']);
+  const [activeDeviceId, setActiveDeviceId] = useState('fan-01');
+
+  const [deviceData, setDeviceData] = useState({});
+  const [telemetryHistory, setTelemetryHistory] = useState([]);
   const [events, setEvents] = useState([]);
-  const [connected, setConnected] = useState(false);
-  const [lastChecked, setLastChecked] = useState(null);
-  const [error, setError] = useState('');
+  const [ackNotice, setAckNotice] = useState(null);
 
-  // Current selected page
-  const [activePage, setActivePage] = useState('overview');
+  const [tempLimitInput, setTempLimitInput] = useState(60);
+  const [vibLimitInput, setVibLimitInput] = useState(4.0);
+  const [currLimitInput, setCurrLimitInput] = useState(1.0);
+  const [isApplyingLimits, setIsApplyingLimits] = useState(false);
+  const [buzzerMuted, setBuzzerMuted] = useState(false);
 
-  // Load readings and refresh every two seconds
+  const [now, setNow] = useState(Date.now());
+  const lastStateMapRef = useRef({});
+
   useEffect(() => {
-    let active = true;
-
-    async function refresh() {
-      try {
-        const [latest, rows, eventRows] = await Promise.all([
-          getLatest(),
-          getHistory(),
-          getEvents(),
-        ]);
-
-        if (!active) return;
-
-        setReading(latest);
-        setHistory(rows);
-        setEvents(eventRows);
-        setConnected(true);
-        setError('');
-        setLastChecked(new Date());
-      } catch (e) {
-        if (!active) return;
-
-        setConnected(false);
-        setError(e.message || 'Could not connect to backend');
-        setLastChecked(new Date());
-      }
-    }
-
-    refresh();
-
-    const timer = setInterval(refresh, 2000);
-
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  const ageMs = reading?.created_at
-    ? Date.now() - new Date(reading.created_at).getTime()
-    : Infinity;
+  const devEntry = deviceData[activeDeviceId];
+  const lastSeen = devEntry?.lastSeen;
+  const isFresh = Boolean(lastSeen && (now - lastSeen <= 10000) && devEntry?.online !== false);
 
-  const isFresh = Number.isFinite(ageMs) && ageMs < 15000;
-  const status = reading ? reading.health_state : 'Awaiting data';
-  const health = stateClass(status);
-
-  const pageLabels = {
-    overview: 'OVERVIEW',
-    analytics: 'SENSOR ANALYTICS',
-    diagnosis: 'AI DIAGNOSIS',
-    history: 'FAULT HISTORY',
+  const currentTelemetry = (devEntry && isFresh) ? devEntry : {
+    device_id: activeDeviceId,
+    temp_c: null,
+    vib_rms: null,
+    current_a: null,
+    state: isFresh ? (devEntry?.state || 'NORMAL') : 'DEVICE OFFLINE',
+    state_reason: 'none',
+    reason_val: null,
+    reason_limit: null,
+    latched: devEntry?.latched || false,
+    baseline_ready: devEntry?.baseline_ready || false,
+    learning_pct: devEntry?.learning_pct || 0,
+    dominant_freq_hz: null,
+    rise_band: 0,
+    hint: isFresh ? (devEntry?.hint || '') : 'Device offline: No real-time telemetry received',
+    health_score: null,
+    ttc_min: null,
+    fan_on: devEntry?.fan_on || false,
+    mode: devEntry?.mode || 'auto',
+    rssi: null,
+    uptime_s: null,
+    online: isFresh,
+    lastSeen: lastSeen
   };
 
-  const pageTitles = {
-    overview: 'Appliance health monitor',
-    analytics: 'Sensor Analytics',
-    diagnosis: 'AI Diagnosis',
-    history: 'Fault History',
+  useEffect(() => {
+    if (!window.mqtt) {
+      return;
+    }
+
+    const wsUrl = MQTT_PROTOCOL + "://" + MQTT_BROKER + ":" + MQTT_PORT + "/mqtt";
+    const options = {
+      clientId: `dash_${Math.random().toString(16).substring(2, 8)}`,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 3000
+    };
+    if (MQTT_USER && MQTT_USER.trim()) {
+      options.username = MQTT_USER;
+      options.password = MQTT_PASS;
+    }
+
+    const client = window.mqtt.connect(wsUrl, options);
+
+    client.on('connect', () => {
+      setBrokerConnected(true);
+      client.subscribe(`${MQTT_PREFIX}/+/telemetry`);
+      client.subscribe(`${MQTT_PREFIX}/+/status`);
+      client.subscribe(`${MQTT_PREFIX}/+/ack`);
+    });
+
+    client.on('error', () => {
+    });
+
+    client.on('close', () => {
+      setBrokerConnected(false);
+    });
+
+    client.on('message', (topic, payload) => {
+      try {
+        const msgStr = payload.toString();
+        const data = JSON.parse(msgStr);
+        const parts = topic.split('/');
+        const devId = parts[1];
+        const subtopic = parts[2];
+
+        setBrokerConnected(true);
+        setDiscoveredDevices(prev => prev.includes(devId) ? prev : [...prev, devId]);
+
+        if (subtopic === 'telemetry') {
+          const nowTime = new Date().toLocaleTimeString();
+          setDeviceData(prev => ({
+            ...prev,
+            [devId]: {
+              ...data,
+              online: true,
+              lastSeen: Date.now()
+            }
+          }));
+
+          if (devId === activeDeviceId) {
+            setTelemetryHistory(prev => [
+              ...prev.slice(-45),
+              {
+                time: nowTime,
+                temp_c: data.temp_c,
+                vib_rms: data.vib_rms,
+                health_score: data.health_score
+              }
+            ]);
+          }
+
+          const prevState = lastStateMapRef.current[devId];
+          if (data.state && data.state !== prevState) {
+            lastStateMapRef.current[devId] = data.state;
+            if (data.state === 'CRITICAL' || data.state === 'WARNING' || data.state === 'SENSOR_ERROR' || data.state === 'CALIBRATING' || data.state === 'LEARNING') {
+              const reasonStr = data.state_reason || (data.state === 'CALIBRATING' || data.state === 'LEARNING' ? 'baseline calibration triggered' : 'threshold exceeded');
+              const detailStr = (data.reason_val !== undefined && data.reason_limit !== undefined && data.reason_limit !== 0)
+                ? ` (${data.reason_val} vs limit ${data.reason_limit})`
+                : '';
+              setEvents(prev => [
+                {
+                  id: Date.now(),
+                  device_id: devId,
+                  state: data.state === 'LEARNING' ? 'CALIBRATING' : data.state,
+                  reason: reasonStr,
+                  time: nowTime,
+                  message: `${data.state === 'LEARNING' ? 'CALIBRATING' : data.state}: ${reasonStr}${detailStr}`
+                },
+                ...prev.slice(0, 29)
+              ]);
+            }
+          }
+        } else if (subtopic === 'status') {
+          const isOnline = (msgStr.trim().toLowerCase() === 'online');
+          setDeviceData(prev => ({
+            ...prev,
+            [devId]: {
+              ...(prev[devId] || {}),
+              online: isOnline,
+              lastSeen: isOnline ? Date.now() : prev[devId]?.lastSeen
+            }
+          }));
+        } else if (subtopic === 'ack') {
+          setAckNotice(`Acknowledged by ${devId} at ${new Date().toLocaleTimeString()}`);
+          setTimeout(() => setAckNotice(null), 4000);
+        }
+      } catch (err) {
+      }
+    });
+
+    setMqttClient(client);
+
+    return () => {
+      client.end();
+    };
+  }, [activeDeviceId]);
+
+  const sendDeviceCommand = (cmdObj) => {
+    if (!mqttClient || !isMqttConnected) {
+      alert("MQTT broker disconnected");
+      return;
+    }
+    const topic = `${MQTT_PREFIX}/${activeDeviceId}/command`;
+    mqttClient.publish(topic, JSON.stringify(cmdObj));
   };
+
+  const handleSetFanMode = (mode) => {
+    sendDeviceCommand({ mode });
+  };
+
+  const handleResetLatch = () => {
+    sendDeviceCommand({ reset: true });
+  };
+
+  const handleCalibrateBaseline = () => {
+    if (isLatched) {
+      setAckNotice("Device is latched: Reset the latch first");
+      setTimeout(() => setAckNotice(null), 3000);
+      return;
+    }
+    if (window.confirm("Start 3-minute baseline calibration? Ensure the fan is firmly mounted and operating normally.")) {
+      sendDeviceCommand({ calibrate: true });
+    }
+  };
+
+  const handleApplyLimits = () => {
+    setIsApplyingLimits(true);
+    sendDeviceCommand({
+      limit_temp: parseFloat(tempLimitInput),
+      limit_vib: parseFloat(vibLimitInput),
+      limit_curr: parseFloat(currLimitInput)
+    });
+    setTimeout(() => setIsApplyingLimits(false), 1200);
+  };
+
+  const handleToggleBuzzer = () => {
+    const next = !buzzerMuted;
+    setBuzzerMuted(next);
+    sendDeviceCommand({ mute_buzzer: next });
+  };
+
+  const state = isFresh ? (currentTelemetry.state || 'NORMAL') : 'DEVICE OFFLINE';
+  const isNormal = state === 'NORMAL';
+  const isWarning = state === 'WARNING';
+  const isCritical = state === 'CRITICAL';
+  const isCalibrating = state === 'CALIBRATING' || state === 'LEARNING';
+  const isLearning = isCalibrating;
+  const isSensorError = state === 'SENSOR_ERROR';
+  const isOffline = !isFresh || state === 'DEVICE OFFLINE';
+  const isLatched = currentTelemetry.latched;
+  const isMqttConnected = brokerConnected || Boolean(mqttClient && mqttClient.connected) || isFresh;
+
+  let badgeColor = '#65d9a9';
+  let badgeTone = 'good';
+  if (isOffline) { badgeColor = '#94a3b8'; badgeTone = 'offline'; }
+  else if (isWarning) { badgeColor = '#f0c16d'; badgeTone = 'warn'; }
+  else if (isCritical || isLatched) { badgeColor = '#ff777e'; badgeTone = 'critical'; }
+  else if (isCalibrating) { badgeColor = '#50b8e7'; badgeTone = 'calibrating'; }
+  else if (isSensorError) { badgeColor = '#ff9f68'; badgeTone = 'critical'; }
+
+  const bandNames = ["1-10 Hz (Looseness)", "10-25 Hz (Harmonics)", "25-40 Hz (1X Rotation)", "40-50 Hz (High Freq)"];
 
   return (
     <div className="app-shell">
-      {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
-            <Activity size={22} />
+            <Cpu size={22} />
           </div>
-
           <div>
-            <strong>APEX</strong>
-            <span>APPLIANCE INTELLIGENCE</span>
+            <strong>APEX HEALTH</strong>
+            <span>ADAPTIVE STATISTICAL MONITOR</span>
           </div>
         </div>
 
-        <div className="side-section">WORKSPACE</div>
-
-        <div
-          className={`nav-item ${
-            activePage === 'overview' ? 'active' : ''
-          }`}
-          onClick={() => setActivePage('overview')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              setActivePage('overview');
-            }
-          }}
-          style={{ cursor: 'pointer' }}
-        >
-          <Gauge size={17} />
-          Overview
-          {activePage === 'overview' && <span className="nav-dot" />}
+        <p className="side-section">TARGET APPLIANCE</p>
+        <div className="device-selector-wrap">
+          <Layers size={14} className="device-select-icon" />
+          <select
+            value={activeDeviceId}
+            onChange={(e) => setActiveDeviceId(e.target.value)}
+            className="device-dropdown"
+          >
+            {discoveredDevices.map(id => (
+              <option key={id} value={id}>{id}</option>
+            ))}
+          </select>
         </div>
 
-        <div
-          className={`nav-item ${
-            activePage === 'analytics' ? 'active' : ''
-          }`}
-          onClick={() => setActivePage('analytics')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              setActivePage('analytics');
-            }
-          }}
-          style={{ cursor: 'pointer' }}
-        >
-          <Waves size={17} />
-          Sensor analytics
-          {activePage === 'analytics' && <span className="nav-dot" />}
-        </div>
-
-        <div
-          className={`nav-item ${
-            activePage === 'diagnosis' ? 'active' : ''
-          }`}
-          onClick={() => setActivePage('diagnosis')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              setActivePage('diagnosis');
-            }
-          }}
-          style={{ cursor: 'pointer' }}
-        >
-          <Cpu size={17} />
-          AI diagnosis
-          {activePage === 'diagnosis' && <span className="nav-dot" />}
-        </div>
-
-        <div
-          className={`nav-item ${
-            activePage === 'history' ? 'active' : ''
-          }`}
-          onClick={() => setActivePage('history')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              setActivePage('history');
-            }
-          }}
-          style={{ cursor: 'pointer' }}
-        >
-          <AlertTriangle size={17} />
-          Fault history
-          <span className="nav-count">{events.length}</span>
+        <p className="side-section" style={{ marginTop: '24px' }}>TELEMETRY STATUS</p>
+        <div className="sidebar-stat-box">
+          <div className="stat-line">
+            <span>Broker:</span>
+            <strong>{MQTT_BROKER}</strong>
+          </div>
+          <div className="stat-line">
+            <span>Transport:</span>
+            <strong>{MQTT_PROTOCOL.toUpperCase()} / {MQTT_PORT}</strong>
+          </div>
+          <div className="stat-line">
+            <span>Baseline:</span>
+            <strong style={{ color: currentTelemetry.baseline_ready ? '#4fe3a7' : '#f0c16d' }}>
+              {currentTelemetry.baseline_ready ? 'Calibrated' : 'Calibrating'}
+            </strong>
+          </div>
+          <div className="stat-line">
+            <span>Device Link:</span>
+            <span className={`live-pill ${isFresh ? 'live' : 'offline'}`}>
+              <span className="live-dot" />
+              {isFresh ? 'LIVE' : 'OFFLINE'}
+            </span>
+          </div>
         </div>
 
         <div className="sidebar-bottom">
           <div className="device-mini">
-            <span
-              className={`connection-dot ${
-                connected && isFresh ? 'online' : ''
-              }`}
-            />
-
+            <span className={`connection-dot ${isMqttConnected ? 'online' : ''}`} />
             <div>
-              <strong>ESP32-FAN-01</strong>
-              <small>
-                {connected && isFresh
-                  ? 'Device reporting'
-                  : 'Waiting for device'}
-              </small>
+              <strong>MQTT WebSockets</strong>
+              <small>{isMqttConnected ? 'Connected & Subscribed' : 'Reconnecting...'}</small>
             </div>
           </div>
-
-          <p>LOCAL MONITORING CONSOLE</p>
+          <p>FIRMWARE v3.0.0 (STATISTICAL)</p>
         </div>
       </aside>
 
-      {/* MAIN CONTENT */}
       <main className="main-content">
         <header className="topbar">
           <div>
-            <div className="eyebrow">
-              PREDICTIVE MAINTENANCE / {pageLabels[activePage]}
-            </div>
-
-            <h1>{pageTitles[activePage]}</h1>
-
-            <p className="subtitle">
-              Real-time condition intelligence for your connected appliance.
-            </p>
+            <div className="eyebrow">STATISTICAL ADAPTIVE MONITOR</div>
+            <h1>{activeDeviceId} Appliance Monitor</h1>
+            <p className="subtitle">Real-time baseline deviation analysis with automated safety latch</p>
           </div>
 
           <div className="topbar-right">
-            <span
-              className={`connection-pill ${
-                connected && isFresh ? 'connected' : ''
-              }`}
-            >
-              <span />
-              {connected && isFresh
-                ? 'DEVICE ONLINE'
-                : connected
-                  ? 'DATA STALE'
-                  : 'API OFFLINE'}
-            </span>
-
-            <div className="updated">
-              <RefreshCw size={13} />
-              {lastChecked
-                ? `Checked ${lastChecked.toLocaleTimeString()}`
-                : 'Connecting…'}
+            <div className={`connection-pill ${isMqttConnected ? 'connected' : ''}`}>
+              <span /> {isMqttConnected ? 'MQTT CONNECTED' : 'DISCONNECTED'}
             </div>
+            <div className={`live-pill ${isFresh ? 'live' : 'offline'}`}>
+              <span className="live-dot" /> {isFresh ? 'LIVE TELEMETRY' : 'DEVICE OFFLINE'}
+            </div>
+            {ackNotice && <div className="ack-banner">{ackNotice}</div>}
           </div>
         </header>
 
-        {/* OVERVIEW PAGE */}
-        {activePage === 'overview' && (
-          <>
-            {error && (
-              <div className="error-banner">
-                <AlertTriangle size={17} />
-                <div>
-                  <strong>Backend connection issue</strong>
-                  <span>
-                    {error}. Start the backend server and refresh this page.
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {!reading && !error && (
-              <div className="info-banner">
-                <Radio size={17} />
-                Waiting for the first sensor packet. No real readings have
-                arrived yet.
-              </div>
-            )}
-
-            <section className="section-heading">
+        {isLatched && (
+          <div className="latch-alert-banner">
+            <div className="latch-banner-content">
+              <ShieldAlert size={28} className="pulse-icon" />
               <div>
-                <h2>Live sensor telemetry</h2>
-                <p>Measurements received from your ESP32</p>
+                <strong>LATCHED - FAN POWER CUT</strong>
+                <span>Critical threshold exceeded. Power is cut and relay is locked open until cleared.</span>
               </div>
+            </div>
+            <button className="btn-reset-latch" onClick={handleResetLatch}>
+              <Unlock size={16} /> RESET LATCH
+            </button>
+          </div>
+        )}
 
-              <span className="refresh-label">
-                <span className="pulse-dot" />
-                AUTO-REFRESH · 2 SEC
-              </span>
-            </section>
-
-            <section className="metrics-grid">
-              <MetricCard
-                icon={Thermometer}
-                title="Motor temperature"
-                value={reading ? fmt(reading.temperature_c, 1) : '—'}
-                unit="°C"
-                description="DS18B20 temperature probe"
-                tone="cyan"
+        {isCalibrating && (
+          <div className="calibrating-banner">
+            <div className="calibrating-banner-top">
+              <span><RotateCcw size={14} className="spin-icon" /> CALIBRATING BASELINE IN PROGRESS</span>
+              <strong>{currentTelemetry.learning_pct || 0}%</strong>
+            </div>
+            <div className="progress-bar-track">
+              <div
+                className="progress-bar-fill"
+                style={{ width: `${currentTelemetry.learning_pct || 0}%` }}
               />
+            </div>
+            <small>Recording 3 minutes of normal operational vibration and thermal dynamics.</small>
+          </div>
+        )}
 
-              <MetricCard
-                icon={Zap}
-                title="Current RMS"
-                value={reading ? fmt(reading.current_rms_a, 3) : '—'}
-                unit="A"
-                description="ACS712 + ADS1115"
-                tone="purple"
-              />
-
-              <MetricCard
-                icon={Activity}
-                title="Vibration RMS"
-                value={reading ? fmt(reading.vibration_rms_g, 3) : '—'}
-                unit="g"
-                description="MPU6050 acceleration feature"
-                tone="blue"
-              />
-
-              <article className={`health-card ${health}`}>
-                <div className="metric-top">
-                  <span className="metric-icon">
-                    <ShieldCheck size={19} />
-                  </span>
-                  <span className="health-label">HEALTH CLASS</span>
-                </div>
-
-                <p className="metric-label">AI health assessment</p>
-
-                <div className="health-state">{status}</div>
-
-                <p className="metric-description">
-                  {reading?.confidence != null
-                    ? `Model confidence: ${fmt(
-                        reading.confidence * 100,
-                        1
-                      )}%`
-                    : 'Confidence not supplied by device'}
-                </p>
-
-                <div className="health-footer">
-                  <span className="health-indicator" />
-                  {reading
-                    ? `Relay ${reading.relay_state}`
-                    : 'Awaiting device data'}
-                </div>
-              </article>
-            </section>
-
-            <section className="content-grid">
-              <article className="panel chart-panel">
-                <div className="panel-heading">
-                  <div>
-                    <h3>Sensor trends</h3>
-                    <p>
-                      Latest {history.length} stored readings · temperature
-                      and current
-                    </p>
-                  </div>
-
-                  <span className="live-tag">
-                    <span /> LIVE
-                  </span>
-                </div>
-
-                <div className="legend">
-                  <span>
-                    <i className="legend-cyan" /> Temperature (°C)
-                  </span>
-                  <span>
-                    <i className="legend-purple" /> Current (A)
-                  </span>
-                </div>
-
-                <TrendChart history={history} />
-              </article>
-
-              <article className="panel device-panel">
-                <div className="panel-heading">
-                  <div>
-                    <h3>Device status</h3>
-                    <p>Connection and protection overview</p>
-                  </div>
-                  <Cpu size={18} className="muted-icon" />
-                </div>
-
-                <div className="device-row">
-                  <span className="device-icon">
-                    <Radio size={18} />
-                  </span>
-
-                  <div>
-                    <strong>ESP32-FAN-01</strong>
-                    <small>Edge controller</small>
-                  </div>
-
-                  <span
-                    className={`status-text ${
-                      connected && isFresh ? 'ok' : 'bad'
-                    }`}
-                  >
-                    {connected && isFresh ? 'Online' : 'Offline'}
-                  </span>
-                </div>
-
-                <div className="device-stat">
-                  <span>Backend API</span>
-                  <strong className={connected ? 'ok' : 'bad'}>
-                    {connected ? 'Reachable' : 'Unavailable'}
-                  </strong>
-                </div>
-
-                <div className="device-stat">
-                  <span>Latest packet</span>
-                  <strong>
-                    {reading?.created_at
-                      ? new Date(reading.created_at).toLocaleTimeString()
-                      : 'No data'}
-                  </strong>
-                </div>
-
-                <div className="device-stat">
-                  <span>Relay state</span>
-                  <strong>{reading?.relay_state || 'Unknown'}</strong>
-                </div>
-
-                <div className="safety-note">
-                  <ShieldCheck size={17} />
-                  <p>
-                    <strong>Local protection</strong>
-                    <br />
-                    Critical shutdown must remain controlled by the ESP32,
-                    not the web dashboard.
-                  </p>
-                </div>
-              </article>
-            </section>
-
-            <section className="panel events-panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Recent fault events</h3>
-                  <p>
-                    Health-state transitions recorded by the backend
-                  </p>
-                </div>
-
-                <span className="event-count">
-                  {events.length} EVENTS
-                </span>
+        <section className="state-hero-grid">
+          <div className={`state-hero-badge ${badgeTone}`}>
+            <div className="badge-header">
+              {isOffline ? <AlertTriangle size={36} /> :
+               (isCritical || isLatched) ? <ShieldAlert size={36} className="pulse-icon" /> :
+               isWarning ? <AlertTriangle size={36} /> :
+               isCalibrating ? <RotateCcw size={36} className="spin-icon" /> :
+               <ShieldCheck size={36} />}
+              <div>
+                <span className="badge-sub">MACHINE HEALTH STATUS</span>
+                <h2>{isOffline ? 'DEVICE OFFLINE' : (isLatched ? 'CRITICAL (LATCHED)' : (state === 'LEARNING' ? 'CALIBRATING' : state))}</h2>
               </div>
+            </div>
+            <p className="state-desc">
+              {isOffline && "No real-time telemetry received from appliance within the last 10 seconds."}
+              {!isOffline && isNormal && "Appliance is operating within healthy vibrational and thermal bounds."}
+              {!isOffline && isWarning && `Statistical anomaly detected: ${currentTelemetry.state_reason || 'deviation from baseline'}.`}
+              {!isOffline && isCritical && `CRITICAL ANOMALY: ${currentTelemetry.state_reason || 'threshold exceeded'}. Relay shut off.`}
+              {!isOffline && isCalibrating && "Building dynamic statistical baseline from operational sensors."}
+              {!isOffline && isSensorError && "Sensor disconnected or invalid data received. Check I2C wiring."}
+            </p>
+            <div className="state-meta-row">
+              <span>Dominant Freq: <strong>{isFresh && currentTelemetry.dominant_freq_hz ? `${currentTelemetry.dominant_freq_hz.toFixed(1)} Hz` : '-'}</strong></span>
+              <span>Primary Rise: <strong>{isFresh ? bandNames[currentTelemetry.rise_band || 0] : '-'}</strong></span>
+              <span>Relay: <strong style={{ color: (isFresh && currentTelemetry.fan_on) ? '#52e1a8' : '#ff7e85' }}>
+                {!isFresh ? 'UNKNOWN' : (currentTelemetry.fan_on ? 'ENERGIZED (ON)' : 'POWER CUT (OFF)')}
+              </strong></span>
+            </div>
+          </div>
 
-              {events.length === 0 ? (
-                <div className="empty-events">
-                  <CheckCircle2 size={20} />
-                  <div>
-                    <strong>No fault events recorded</strong>
-                    <span>
-                      Events will appear here when the backend receives a
-                      non-normal health state.
-                    </span>
-                  </div>
+          <div className="health-score-hero">
+            <div className="health-hero-gauge">
+              <CircularGauge
+                value={isFresh && Number.isFinite(currentTelemetry.health_score) ? Math.round(currentTelemetry.health_score) : null}
+                label="HEALTH SCORE"
+                unit="%"
+                color={badgeColor}
+              />
+            </div>
+            <div className="ttc-box">
+              <span className="ttc-label"><Clock3 size={14} /> TIME TO CRITICAL</span>
+              <strong className="ttc-value">
+                {isFresh && currentTelemetry.ttc_min && currentTelemetry.ttc_min > 0
+                  ? `${currentTelemetry.ttc_min.toFixed(1)} min`
+                  : (isFresh ? 'Nominal' : '-')}
+              </strong>
+              <small>{isFresh ? (currentTelemetry.ttc_min ? 'Projected via linear regression trend' : 'No upward runaway trend') : 'Awaiting real telemetry'}</small>
+            </div>
+          </div>
+        </section>
+
+        <section className="anomaly-hint-card">
+          <div className="hint-icon-wrap">
+            <Info size={20} />
+          </div>
+          <div className="hint-body">
+            <span className="hint-label">VIBRATION DIAGNOSTIC HINT</span>
+            <p className="hint-text">
+              {isFresh ? (currentTelemetry.hint || "nominal baseline vibration") : "Device offline: No real-time telemetry received"}
+            </p>
+          </div>
+          <div className="hint-freq-badge">
+            <span>Peak: {isFresh && currentTelemetry.dominant_freq_hz ? `${currentTelemetry.dominant_freq_hz.toFixed(1)} Hz` : '-'}</span>
+          </div>
+        </section>
+
+        <section className="metrics-grid">
+          <div className="metric-card cyan">
+            <div className="metric-top">
+              <span className="metric-icon"><Waves size={20} /></span>
+              <span className="metric-live"><span /> 100 Hz FFT</span>
+            </div>
+            <p className="metric-label">DYNAMIC VIBRATION RMS</p>
+            <div className="metric-value">
+              {isFresh && Number.isFinite(currentTelemetry.vib_rms) ? currentTelemetry.vib_rms.toFixed(3) : '-'}
+              {isFresh && Number.isFinite(currentTelemetry.vib_rms) && <span>m/s²</span>}
+            </div>
+            <p className="metric-description">Safety Limit: {vibLimitInput} m/s²</p>
+          </div>
+
+          <div className="metric-card purple">
+            <div className="metric-top">
+              <span className="metric-icon"><Thermometer size={20} /></span>
+              <span className="metric-live"><span /> DS18B20</span>
+            </div>
+            <p className="metric-label">PROBE TEMPERATURE</p>
+            <div className="metric-value">
+              {isFresh && Number.isFinite(currentTelemetry.temp_c) ? currentTelemetry.temp_c.toFixed(1) : '-'}
+              {isFresh && Number.isFinite(currentTelemetry.temp_c) && <span>°C</span>}
+            </div>
+            <p className="metric-description">Safety Limit: {tempLimitInput} °C</p>
+          </div>
+
+          <div className="metric-card blue">
+            <div className="metric-top">
+              <span className="metric-icon"><Zap size={20} /></span>
+              <span className="metric-live"><span /> ACS712</span>
+            </div>
+            <p className="metric-label">CURRENT CONSUMPTION</p>
+            <div className="metric-value">
+              {isFresh && Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null
+                ? currentTelemetry.current_a.toFixed(3)
+                : 'Disabled'}
+              {isFresh && Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null && <span>A</span>}
+            </div>
+            <p className="metric-description">Safety Limit: {currLimitInput} A</p>
+          </div>
+
+          <div className="metric-card green">
+            <div className="metric-top">
+              <span className="metric-icon"><Radio size={20} /></span>
+              <span className="metric-live"><span /> WiFi RSSI</span>
+            </div>
+            <p className="metric-label">WIFI SIGNAL STRENGTH</p>
+            <div className="metric-value">
+              {isFresh && currentTelemetry.rssi !== null ? currentTelemetry.rssi : '-'}
+              {isFresh && currentTelemetry.rssi !== null && <span>dBm</span>}
+            </div>
+            <p className="metric-description">
+              {isFresh && currentTelemetry.uptime_s !== null ? `Uptime: ${Math.round(currentTelemetry.uptime_s / 60)} min` : 'Device offline'}
+            </p>
+          </div>
+        </section>
+
+        <section className="content-grid">
+          <div className="panel chart-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Real-Time Telemetry Trends</h3>
+                <p>Adaptive baseline metrics and thermal trends</p>
+              </div>
+              <div className="live-tag"><span /> {isFresh ? 'STREAMING' : 'OFFLINE'}</div>
+            </div>
+
+            <div className="chart-wrap">
+              {(!isFresh || telemetryHistory.length < 2) ? (
+                <div className="chart-empty">
+                  <Activity size={24} />
+                  <span>{!isFresh ? 'Device offline: No real-time data' : 'Streaming sensor windows from device...'}</span>
                 </div>
               ) : (
-                <div className="event-list">
-                  {events.slice(0, 6).map((event) => (
-                    <div className="event-row" key={event.id}>
-                      <span
-                        className={`event-icon ${stateClass(
-                          event.health_state
-                        )}`}
-                      >
-                        <AlertTriangle size={16} />
-                      </span>
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={telemetryHistory}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1d2a3f" />
+                    <XAxis dataKey="time" stroke="#5d708a" fontSize={10} tickLine={false} />
+                    <YAxis yAxisId="vib" stroke="#38c8ee" fontSize={10} tickLine={false} domain={[0, 'auto']} />
+                    <YAxis yAxisId="temp" orientation="right" stroke="#b69cff" fontSize={10} tickLine={false} domain={['auto', 'auto']} />
+                    <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', fontSize: '11px' }} />
+                    <Line yAxisId="vib" type="monotone" dataKey="vib_rms" name="Vib RMS (m/s²)" stroke="#38c8ee" dot={false} strokeWidth={2} />
+                    <Line yAxisId="temp" type="monotone" dataKey="temp_c" name="Temp (°C)" stroke="#b69cff" dot={false} strokeWidth={2} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
 
-                      <div className="event-copy">
-                        <strong>{event.message}</strong>
-                        <small>
-                          {event.device_id} ·{' '}
-                          {new Date(event.created_at).toLocaleString()}
-                        </small>
-                      </div>
+            <div className="legend">
+              <span><i className="legend-cyan" /> Vibration RMS (m/s²)</span>
+              <span><i className="legend-purple" /> Temperature (°C)</span>
+            </div>
+          </div>
 
-                      <span
-                        className={`state-chip ${stateClass(
-                          event.health_state
-                        )}`}
-                      >
-                        {event.health_state}
-                      </span>
-                    </div>
-                  ))}
+          <div className="panel control-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Appliance Remote Controls</h3>
+                <p>Validated and acknowledged via MQTT</p>
+              </div>
+              <Sliders size={18} className="muted-icon" />
+            </div>
+
+            <div className="calibration-top-block">
+              <button
+                className={`btn-calibrate-hero ${isLatched ? 'disabled' : ''}`}
+                onClick={handleCalibrateBaseline}
+                disabled={isLatched}
+                title={isLatched ? 'Reset the latch first' : 'Calibrate Baseline'}
+              >
+                <RotateCcw size={15} className={isCalibrating ? 'spin-icon' : ''} />
+                <span>{isCalibrating ? 'Calibrating Baseline...' : 'Calibrate Baseline'}</span>
+              </button>
+              {isLatched && (
+                <div className="latch-notice-tag">
+                  <ShieldAlert size={14} />
+                  <span>Reset the latch first</span>
                 </div>
               )}
-            </section>
-          </>
-        )}
+            </div>
 
-        {/* SENSOR ANALYTICS PAGE */}
-        {activePage === 'analytics' && (
-          <>
-            <section className="section-heading">
-              <div>
-                <h2>Sensor Analytics</h2>
-                <p>
-                  Measurements and trends from the connected appliance
-                </p>
+            <div className="control-section">
+              <label className="control-label"><Power size={14} /> FAN OPERATING MODE</label>
+              <div className="button-group">
+                <button
+                  className={`btn-mode ${currentTelemetry.mode === 'auto' ? 'active' : ''}`}
+                  onClick={() => handleSetFanMode('auto')}
+                  disabled={isLatched}
+                >
+                  AUTO
+                </button>
+                <button
+                  className={`btn-mode ${currentTelemetry.mode === 'on' ? 'active' : ''}`}
+                  onClick={() => handleSetFanMode('on')}
+                  disabled={isLatched}
+                >
+                  FORCE ON
+                </button>
+                <button
+                  className={`btn-mode ${currentTelemetry.mode === 'off' ? 'active' : ''}`}
+                  onClick={() => handleSetFanMode('off')}
+                  disabled={isLatched}
+                >
+                  FORCE OFF
+                </button>
               </div>
+              {isLatched && <small className="warn-text">Device is latched: Manual commands locked until reset</small>}
+            </div>
 
-              <span className="refresh-label">
-                <span className="pulse-dot" />
-                AUTO-REFRESH · 2 SEC
-              </span>
-            </section>
-
-            <section className="metrics-grid">
-              <MetricCard
-                icon={Thermometer}
-                title="Temperature"
-                value={reading ? fmt(reading.temperature_c, 1) : '—'}
-                unit="°C"
-                description="Latest DS18B20 reading"
-                tone="cyan"
+            <div className="control-section">
+              <div className="slider-header">
+                <span>Max Temperature Limit</span>
+                <strong>{tempLimitInput} °C</strong>
+              </div>
+              <input
+                type="range" min="40" max="85" step="1"
+                value={tempLimitInput}
+                onChange={(e) => setTempLimitInput(e.target.value)}
+                className="range-slider"
               />
 
-              <MetricCard
-                icon={Zap}
-                title="Current RMS"
-                value={reading ? fmt(reading.current_rms_a, 3) : '—'}
-                unit="A"
-                description="Latest current measurement"
-                tone="purple"
+              <div className="slider-header" style={{ marginTop: '12px' }}>
+                <span>Max Vibration RMS Limit</span>
+                <strong>{vibLimitInput} m/s²</strong>
+              </div>
+              <input
+                type="range" min="1.0" max="10.0" step="0.2"
+                value={vibLimitInput}
+                onChange={(e) => setVibLimitInput(e.target.value)}
+                className="range-slider"
               />
 
-              <MetricCard
-                icon={Activity}
-                title="Vibration RMS"
-                value={reading ? fmt(reading.vibration_rms_g, 3) : '—'}
-                unit="g"
-                description="Latest vibration measurement"
-                tone="blue"
-              />
-            </section>
+              <button
+                className="btn-apply-limits"
+                onClick={handleApplyLimits}
+                disabled={isApplyingLimits}
+              >
+                {isApplyingLimits ? 'Applying Settings...' : 'Apply Hard Safety Limits'}
+              </button>
+            </div>
 
-            <section className="panel chart-panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Temperature and current trends</h3>
-                  <p>{history.length} stored readings</p>
-                </div>
+            <div className="quick-actions-row">
+              <button className={`btn-utility ${buzzerMuted ? 'muted' : ''}`} onClick={handleToggleBuzzer}>
+                {buzzerMuted ? <BellOff size={14} /> : <Bell size={14} />}
+                {buzzerMuted ? 'Unmute Buzzer' : 'Mute Buzzer'}
+              </button>
+            </div>
+          </div>
+        </section>
 
-                <span className="live-tag">
-                  <span /> LIVE
-                </span>
-              </div>
+        <section className="panel events-panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Appliance Event & Alert History</h3>
+              <p>Edge anomaly events and safety latch state transitions</p>
+            </div>
+            <div className="event-count">{events.length} Alerts</div>
+          </div>
 
-              <div className="legend">
-                <span>
-                  <i className="legend-cyan" /> Temperature (°C)
-                </span>
-                <span>
-                  <i className="legend-purple" /> Current (A)
-                </span>
-              </div>
-
-              <TrendChart history={history} />
-            </section>
-
-            <section className="panel events-panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Reading summary</h3>
-                  <p>Latest values received from the backend</p>
-                </div>
-              </div>
-
-              <div className="device-stat">
-                <span>Total stored readings</span>
-                <strong>{history.length}</strong>
-              </div>
-
-              <div className="device-stat">
-                <span>Latest temperature</span>
-                <strong>
-                  {reading
-                    ? `${fmt(reading.temperature_c, 1)} °C`
-                    : 'No data'}
-                </strong>
-              </div>
-
-              <div className="device-stat">
-                <span>Latest current</span>
-                <strong>
-                  {reading
-                    ? `${fmt(reading.current_rms_a, 3)} A`
-                    : 'No data'}
-                </strong>
-              </div>
-
-              <div className="device-stat">
-                <span>Latest vibration</span>
-                <strong>
-                  {reading
-                    ? `${fmt(reading.vibration_rms_g, 3)} g`
-                    : 'No data'}
-                </strong>
-              </div>
-            </section>
-          </>
-        )}
-
-        {/* AI DIAGNOSIS PAGE */}
-        {activePage === 'diagnosis' && (
-          <>
-            <section className="section-heading">
+          {events.length === 0 ? (
+            <div className="empty-events">
+              <CheckCircle2 size={24} />
               <div>
-                <h2>AI Diagnosis</h2>
-                <p>
-                  Review the health classification reported by your device
-                </p>
+                <strong>Zero Anomalies Detected</strong>
+                <span>Appliance is operating in nominal baseline parameters.</span>
               </div>
-            </section>
-
-            {!reading ? (
-              <section className="panel events-panel">
-                <div className="empty-events">
-                  <Radio size={20} />
-                  <div>
-                    <strong>No sensor readings available</strong>
-                    <span>
-                      Connect the ESP32 and send a reading to view its
-                      reported health state.
-                    </span>
+            </div>
+          ) : (
+            <div className="event-list">
+              {events.map((evt) => (
+                <div key={evt.id} className="event-row">
+                  <div className={`event-icon ${evt.state.toLowerCase()}`}>
+                    <AlertTriangle size={16} />
                   </div>
+                  <div className="event-copy">
+                    <strong>{evt.message}</strong>
+                    <small>{evt.device_id} | {evt.time} | Reason: {evt.reason}</small>
+                  </div>
+                  <span className={`state-chip ${evt.state.toLowerCase()}`}>
+                    {evt.state}
+                  </span>
                 </div>
-              </section>
-            ) : (
-              <>
-                <section className="metrics-grid">
-                  <article className={`health-card ${health}`}>
-                    <div className="metric-top">
-                      <span className="metric-icon">
-                        <ShieldCheck size={19} />
-                      </span>
-                      <span className="health-label">HEALTH CLASS</span>
-                    </div>
-
-                    <p className="metric-label">Reported health status</p>
-
-                    <div className="health-state">{status}</div>
-
-                    <p className="metric-description">
-                      {reading.confidence != null
-                        ? `Reported model confidence: ${fmt(
-                            reading.confidence * 100,
-                            1
-                          )}%`
-                        : 'Model confidence not provided'}
-                    </p>
-                  </article>
-
-                  <MetricCard
-                    icon={Thermometer}
-                    title="Temperature"
-                    value={fmt(reading.temperature_c, 1)}
-                    unit="°C"
-                    description="Latest temperature"
-                    tone="cyan"
-                  />
-
-                  <MetricCard
-                    icon={Zap}
-                    title="Current RMS"
-                    value={fmt(reading.current_rms_a, 3)}
-                    unit="A"
-                    description="Latest current"
-                    tone="purple"
-                  />
-                </section>
-
-                <section className="panel events-panel">
-                  <div className="panel-heading">
-                    <div>
-                      <h3>Diagnostic details</h3>
-                      <p>Values supplied by the latest sensor packet</p>
-                    </div>
-                    <Cpu size={20} />
-                  </div>
-
-                  <div className="device-stat">
-                    <span>Health state</span>
-                    <strong>{reading.health_state}</strong>
-                  </div>
-
-                  <div className="device-stat">
-                    <span>Vibration RMS</span>
-                    <strong>
-                      {fmt(reading.vibration_rms_g, 3)} g
-                    </strong>
-                  </div>
-
-                  <div className="device-stat">
-                    <span>Relay state</span>
-                    <strong>{reading.relay_state}</strong>
-                  </div>
-
-                  <div className="device-stat">
-                    <span>Reading timestamp</span>
-                    <strong>
-                      {reading.created_at
-                        ? new Date(reading.created_at).toLocaleString()
-                        : 'Not available'}
-                    </strong>
-                  </div>
-
-                  <div className="safety-note">
-                    <ShieldCheck size={17} />
-                    <p>
-                      <strong>Diagnosis information</strong>
-                      <br />
-                      This page displays the health state supplied by the
-                      device. A trained TinyML model must be implemented
-                      and tested before this can be treated as a genuine
-                      AI diagnosis.
-                    </p>
-                  </div>
-                </section>
-              </>
-            )}
-          </>
-        )}
-
-        {/* FAULT HISTORY PAGE */}
-        {activePage === 'history' && (
-          <>
-            <section className="section-heading">
-              <div>
-                <h2>Fault History</h2>
-                <p>
-                  Health-state changes recorded by the backend
-                </p>
-              </div>
-
-              <span className="event-count">
-                {events.length} EVENTS
-              </span>
-            </section>
-
-            <section className="panel events-panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Recorded fault events</h3>
-                  <p>Newest events appear first</p>
-                </div>
-
-                <AlertTriangle size={20} />
-              </div>
-
-              {events.length === 0 ? (
-                <div className="empty-events">
-                  <CheckCircle2 size={20} />
-                  <div>
-                    <strong>No fault events recorded</strong>
-                    <span>
-                      This list will populate when the backend receives
-                      a non-normal health state that creates a fault event.
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="event-list">
-                  {events.map((event) => (
-                    <div className="event-row" key={event.id}>
-                      <span
-                        className={`event-icon ${stateClass(
-                          event.health_state
-                        )}`}
-                      >
-                        <AlertTriangle size={16} />
-                      </span>
-
-                      <div className="event-copy">
-                        <strong>{event.message}</strong>
-                        <small>
-                          Device: {event.device_id}
-                          {' · '}
-                          {new Date(event.created_at).toLocaleString()}
-                        </small>
-                      </div>
-
-                      <span
-                        className={`state-chip ${stateClass(
-                          event.health_state
-                        )}`}
-                      >
-                        {event.health_state}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          </>
-        )}
-
-        {/* FOOTER */}
-        <footer>
-          <span>
-            APEX <b>·</b> IoT Appliance Health Monitor
-          </span>
-
-          <span>
-            <Clock3 size={13} />
-            {reading?.created_at
-              ? `Last reading ${new Date(
-                  reading.created_at
-                ).toLocaleString()}`
-              : 'No sensor reading received'}
-          </span>
-        </footer>
+              ))}
+            </div>
+          )}
+        </section>
       </main>
     </div>
   );

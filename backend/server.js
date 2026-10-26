@@ -1,4 +1,3 @@
-
 const express = require("express");
 const cors = require("cors");
 
@@ -8,20 +7,29 @@ const {
   saveDatabase
 } = require("./database");
 
+const path = require("path");
+
 const app = express();
 const PORT = 5000;
 
 app.use(cors());
 app.use(express.json({ limit: "20kb" }));
 
+const frontendDist = path.join(__dirname, "../frontend/dist");
+app.use(express.static(frontendDist));
+
 const allowedStates = [
   "Normal",
   "Early Abnormality",
   "Maintenance Recommended",
-  "Critical"
+  "Critical",
+  "NORMAL",
+  "WARNING",
+  "CRITICAL",
+  "CALIBRATING",
+  "SENSOR_ERROR"
 ];
 
-// Add new columns without deleting existing readings.
 function ensureAccelerationColumns() {
   const db = getDatabase();
 
@@ -57,7 +65,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Receive readings from the ESP32.
 app.post("/api/readings", (req, res) => {
   try {
     const r = req.body;
@@ -228,11 +235,16 @@ app.get("/api/events", (req, res) => {
   res.json(rowsToObjects(result));
 });
 
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    return next();
+  }
+  res.sendFile(path.join(frontendDist, "index.html"));
+});
+
 async function startServer() {
   try {
     await initializeDatabase();
-
-    // Ensure the existing table supports vibration-axis history.
     ensureAccelerationColumns();
 
     app.listen(PORT, "0.0.0.0", () => {

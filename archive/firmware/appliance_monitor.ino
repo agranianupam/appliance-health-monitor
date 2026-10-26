@@ -1,20 +1,3 @@
-/*
-  APEX Appliance Health Monitor — ESP32 upload starter
-  Libraries to install in Arduino IDE:
-    - Adafruit MPU6050
-    - Adafruit Unified Sensor
-    - Adafruit ADS1X15
-    - OneWire
-    - DallasTemperature
-
-  IMPORTANT:
-  - This sketch is a sensor/network integration starter, not a validated TinyML model.
-  - It sends health_state="Unknown" and confidence=null until a trained model is integrated.
-  - Current measurement needs calibration for your specific ACS712 board and load.
-  - Confirm the ESP32 ADC/input voltage limits and wiring before powering the circuit.
-  - Relay safety logic is intentionally NOT implemented here; add and test it locally only
-    after confirming your relay module's active level and fail-safe behaviour.
-*/
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Wire.h>
@@ -26,15 +9,14 @@
 
 const char* WIFI_SSID = "YOUR_WIFI_NAME";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-// Use the laptop's IPv4 address from ipconfig, not localhost.
+
 const char* API_URL = "http://192.168.1.25:5000/api/readings";
 const char* DEVICE_ID = "ESP32-FAN-01";
 
-// Change these pins to match your actual wiring.
 constexpr int I2C_SDA_PIN = 21;
 constexpr int I2C_SCL_PIN = 22;
 constexpr int DS18B20_PIN = 4;
-constexpr int ACS712_ADC_CHANNEL = 0; // ADS1115 A0
+constexpr int ACS712_ADC_CHANNEL = 0;
 constexpr unsigned long UPLOAD_INTERVAL_MS = 2000;
 constexpr unsigned long CURRENT_WINDOW_MS = 250;
 
@@ -46,10 +28,8 @@ bool mpuReady = false;
 bool adsReady = false;
 unsigned long lastUpload = 0;
 
-// Set this only after calibrating the ACS712 + ADS1115 with a known load.
-// This placeholder deliberately prevents fake current values from being presented as calibrated.
-constexpr float ADS_VOLTS_PER_AMP = 0.100f; // EXAMPLE ONLY: replace with your calibrated value.
-float currentZeroVolts = 1.65f;            // EXAMPLE ONLY: measure your sensor's zero-current output.
+constexpr float ADS_VOLTS_PER_AMP = 0.100f;
+float currentZeroVolts = 1.65f;
 
 bool readTemperature(float &temperatureC) {
   tempSensor.requestTemperatures();
@@ -66,7 +46,7 @@ bool readVibrationRms(float &rmsG) {
   for (int i = 0; i < samples; i++) {
     sensors_event_t accel, gyro, temp;
     if (!mpu.getEvent(&accel, &gyro, &temp)) return false;
-    // Adafruit library reports m/s^2. Convert magnitude to g and remove 1 g gravity approximately.
+
     float magnitudeG = sqrtf(accel.acceleration.x * accel.acceleration.x +
                              accel.acceleration.y * accel.acceleration.y +
                              accel.acceleration.z * accel.acceleration.z) / 9.80665f;
@@ -80,8 +60,7 @@ bool readVibrationRms(float &rmsG) {
 
 bool readCurrentRms(float &currentA) {
   if (!adsReady || ADS_VOLTS_PER_AMP <= 0) return false;
-  // This sample window is a simple prototype estimate. Calibrate for your sensor/load;
-  // for AC waveform RMS, verify ADS1115 sampling rate is sufficient for the signal.
+
   unsigned long started = millis();
   double sumSquares = 0.0;
   unsigned long count = 0;
@@ -108,7 +87,6 @@ void sendReading(float temperatureC, float currentA, float vibrationG) {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(2500);
 
-  // Unknown is honest until the trained TinyML classifier is integrated.
   String payload = "{";
   payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
   payload += "\"temperature_c\":" + String(temperatureC, 2) + ",";
