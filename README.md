@@ -51,7 +51,7 @@ A low-cost, edge-intelligent predictive maintenance monitor for small rotating a
 | **MPU6050 (Clone)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Clone `WHO_AM_I = 0x74`. Read via direct I2C registers: Wake (`0x6B = 0x00`), DLPF ~21 Hz (`0x1A = 0x04`), Range +/-8g (`0x1C = 0x10`), 400 kHz clock. |
 | **DS18B20 Probe** | `GPIO 4` | 4.7k pull-up to 3.3V. Non-blocking conversion (spanned across 128-sample window). |
 | **ADS1115 (A0)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Address `0x48`, `GAIN_ONE` (+/-4.096V). Reads ACS712 via 22k/10k divider (ratio 10/32). Optional via `#define USE_CURRENT`. |
-| **Relay Module** | `GPIO 26` | **Active LOW** (`LOW` = Fan Energized, `HIGH` = Fan Off / Power Cut). |
+| **Relay Module** | `GPIO 26` | `HIGH` = Fan ON (Energized), `LOW` = Fan OFF (Power Cut). Verified on DevKit. |
 | **Green LED** | `GPIO 32` | **NORMAL & CALIBRATING** indicator (330 ohm resistor). |
 | **Yellow LED** | `GPIO 33` | **WARNING** indicator (330 ohm resistor). |
 | **Red LED** | `GPIO 25` | **CRITICAL (LATCHED)** & **SENSOR ERROR** indicator. |
@@ -104,7 +104,7 @@ const float CRIT_VIB_ABS_MIN    = 1.5f;
 | **CALIBRATING** | ON (Energized) | ON | OFF | OFF | OFF | Unlatched (Progress bar on UI) |
 | **WARNING** | ON (Energized) | OFF | ON | OFF | OFF | Unlatched (Warning on UI) |
 | **CRITICAL** | **OFF (Power Cut)** | OFF | OFF | **ON** | **ON** | **LATCHED** (Requires `{"reset": true}`) |
-| **SENSOR_ERROR**| **OFF (Power Cut)** | OFF | OFF | **ON** | OFF | Unlatched (Auto-recovers when wired) |
+| **SENSOR_ERROR**| ON (Energized) | OFF | OFF | **ON** | OFF | Unlatched (Auto-recovers when wired) |
 
 ---
 

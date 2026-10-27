@@ -528,12 +528,25 @@ export default function App() {
             </div>
             <p className="metric-label">CURRENT CONSUMPTION</p>
             <div className="metric-value">
-              {isFresh && Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null
-                ? currentTelemetry.current_a.toFixed(3)
-                : 'Disabled'}
-              {isFresh && Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null && <span>A</span>}
+              {!isFresh ? (
+                'Offline'
+              ) : currentTelemetry.current_status === 'disabled' || (currentTelemetry.current_a === null && !currentTelemetry.current_status) ? (
+                'Disabled'
+              ) : currentTelemetry.current_status === 'invalid' || currentTelemetry.current_status === 'disconnected' ? (
+                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Invalid</span>
+              ) : Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null ? (
+                <>
+                  {currentTelemetry.current_a.toFixed(3)} <span>A</span>
+                </>
+              ) : (
+                'Disabled'
+              )}
             </div>
-            <p className="metric-description">Safety Limit: {currLimitInput} A</p>
+            <p className="metric-description">
+              {currentTelemetry.current_status === 'invalid' || currentTelemetry.current_status === 'disconnected'
+                ? 'Sensor error / disconnected'
+                : `Safety Limit: ${currLimitInput} A`}
+            </p>
           </div>
 
           <div className="metric-card green">

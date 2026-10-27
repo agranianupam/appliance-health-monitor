@@ -1,6 +1,6 @@
-#define USE_CURRENT 0
+#define USE_CURRENT 1
 #define USE_TLS 0
-#define FIRMWARE_VERSION "3.0.0-adaptive"
+#define FIRMWARE_VERSION "3.0.1-fan-policy-current"
 
 const char* WIFI_SSID = "Accio Internet";
 const char* WIFI_PASSWORD = "youre a wizard harry";
@@ -149,6 +149,130 @@ bool dequeueTelemetry(TelemetrySnapshot &outItem) {
 OneWire oneWire(PIN_ONEWIRE);
 DallasTemperature tempSensor(&oneWire);
 Preferences prefs;
+
+#if USE_CURRENT
+Adafruit_ADS1115 ads;
+bool adsDetected = false;
+
+constexpr uint8_t ADS1115_I2C_ADDR = 0x48;
+constexpr uint8_t ACS712_ADC_CHANNEL = 0; // ADS1115 Single-ended A0
+constexpr float VOLTAGE_DIVIDER_RATIO = CURRENT_VOLTAGE_DIVIDER_RATIO; // 3.2f ((22k+10k)/10k) from features.h
+constexpr float ACS712_SENSITIVITY = CURRENT_ACS712_SENSITIVITY;       // 185 mV/A (0.185 V/A) from features.h
+float currentZeroVolts = CURRENT_NOMINAL_ZERO_V;                       // 2.50f nominal midpoint from features.h
+
+int16_t latestRawAdc = 0;
+float latestVDivided = 0.0f;
+float latestVSensor = 0.0f;
+float latestCurrentA = 0.0f;
+bool latestCurrentValid = false;
+
+void calibrateZeroCurrent() {
+  if (!adsDetected) return;
+  Wire.beginTransmission(ADS1115_I2C_ADDR);
+  if (Wire.endTransmission() != 0) {
+    adsDetected = false;
+    return;
+  }
+
+  Serial.println(F("[ADC CALIB] Acquiring zero-current baseline samples on A0..."));
+  float sumV = 0.0f;
+  int validCount = 0;
+  for (int i = 0; i < 30; i++) {
+    int16_t raw = ads.readADC_SingleEnded(ACS712_ADC_CHANNEL);
+    float vDiv = ads.computeVolts(raw);
+    float vSens = vDiv * VOLTAGE_DIVIDER_RATIO;
+    if (vSens >= 1.5f && vSens <= 3.5f && isfinite(vSens)) {
+      sumV += vSens;
+      validCount++;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+
+  if (validCount >= 15) {
+    currentZeroVolts = sumV / validCount;
+    prefs.begin("fan_base", false);
+    prefs.putFloat("cur_zero", currentZeroVolts);
+    prefs.end();
+    Serial.printf("[ADC CALIB] Zero-current voltage calibrated: %.4f V (from %d samples)\n", currentZeroVolts, validCount);
+  } else {
+    Serial.printf("[ADC CALIB] Insufficient valid zero-current readings; keeping %.4f V\n", currentZeroVolts);
+  }
+}
+
+bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivided, float &outVSensor) {
+  if (!adsDetected) {
+    Wire.beginTransmission(ADS1115_I2C_ADDR);
+    if (Wire.endTransmission() == 0) {
+      if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
+        ads.setGain(GAIN_ONE);
+        adsDetected = true;
+        Serial.println(F("[ADC] ADS1115 reconnected at 0x48"));
+      }
+    }
+    if (!adsDetected) {
+      outCurrentA = -1.0f;
+      outRawAdc = 0;
+      outVDivided = 0.0f;
+      outVSensor = 0.0f;
+      return false;
+    }
+  }
+
+  Wire.beginTransmission(ADS1115_I2C_ADDR);
+  if (Wire.endTransmission() != 0) {
+    adsDetected = false;
+    outCurrentA = -1.0f;
+    outRawAdc = 0;
+    outVDivided = 0.0f;
+    outVSensor = 0.0f;
+    return false;
+  }
+
+  int32_t rawSum = 0;
+  double sumSqAmps = 0.0;
+  const int NUM_SAMPLES = 8;
+  float latestVDiv = 0.0f;
+  float latestVSens = 0.0f;
+
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    int16_t raw = ads.readADC_SingleEnded(ACS712_ADC_CHANNEL);
+    rawSum += raw;
+    float vDiv = ads.computeVolts(raw);
+    float vSens = vDiv * VOLTAGE_DIVIDER_RATIO;
+    latestVDiv = vDiv;
+    latestVSens = vSens;
+
+    float deltaV = vSens - currentZeroVolts;
+    float instA = deltaV / ACS712_SENSITIVITY;
+    sumSqAmps += (double)(instA * instA);
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  int16_t avgRaw = (int16_t)(rawSum / NUM_SAMPLES);
+  outRawAdc = avgRaw;
+  outVDivided = ads.computeVolts(avgRaw);
+  // Voltage divider ratio (3.2x) applied exactly once to convert ADC voltage to ACS712 pin voltage:
+  outVSensor = outVDivided * VOLTAGE_DIVIDER_RATIO;
+
+  // Validation: If ACS712 is disconnected / pulled to GND through 10k resistor (< 1.0V)
+  // or rail shorted (> 4.5V) or negative ADC reading:
+  if (outVSensor < 1.0f || outVSensor > 4.5f || !isfinite(outVSensor) || avgRaw <= 0) {
+    outCurrentA = -1.0f;
+    return false;
+  }
+
+  // True RMS current calculation:
+  // For DC load: sqrt(I^2) = |I|
+  // For AC load: true RMS across sampled waveform
+  float rmsA = sqrtf((float)(sumSqAmps / NUM_SAMPLES));
+  if (rmsA < CURRENT_NOISE_DEADBAND_A) {
+    rmsA = 0.0f; // Valid zero current
+  }
+  outCurrentA = rmsA;
+  return true;
+}
+#endif
+
 #if USE_TLS
 WiFiClientSecure secureEspClient;
 #else
@@ -354,9 +478,25 @@ void loadBaseline() {
     for (int k = 0; k < 4; k++) {
       baseBandStd[k] = max(baseBandStd[k], max(0.05f * baseBandMean[k], 0.01f));
     }
+#if USE_CURRENT
+    currentZeroVolts = prefs.getFloat("cur_zero", 2.50f);
+    if (currentZeroVolts < 1.5f || currentZeroVolts > 3.5f || !isfinite(currentZeroVolts)) {
+      currentZeroVolts = 2.50f;
+    }
+#endif
     prefs.end();
+#if USE_CURRENT
+    Serial.printf("[ADC BASELINE] Loaded zero-current voltage: %.4f V\n", currentZeroVolts);
+#endif
     printBaseline("BOOT");
   } else {
+#if USE_CURRENT
+    currentZeroVolts = prefs.getFloat("cur_zero", 2.50f);
+    if (currentZeroVolts < 1.5f || currentZeroVolts > 3.5f || !isfinite(currentZeroVolts)) {
+      currentZeroVolts = 2.50f;
+    }
+    Serial.printf("[ADC BASELINE] Zero-current voltage: %.4f V\n", currentZeroVolts);
+#endif
     prefs.end();
     Serial.println("[BOOT BASELINE] Incomplete or uncalibrated baseline; entering calibration mode");
   }
@@ -379,25 +519,32 @@ void saveBaseline() {
   prefs.putFloat("b3_m", baseBandMean[3]);
   prefs.putFloat("b3_s", baseBandStd[3]);
   prefs.putFloat("freq_m", baseDomFreqMean);
+#if USE_CURRENT
+  prefs.putFloat("cur_zero", currentZeroVolts);
+#endif
   prefs.end();
   baselineReady = true;
   printBaseline("CALIBRATED");
 }
 
-#define RELAY_RELEASE_FOR_OFF 0
+// ============================================================================
+// RELAY POLARITY CONFIGURATION
+// ============================================================================
+// Actual hardware behavior verified on ESP32 DevKit:
+//   GPIO26 HIGH -> Relay energized / circuit closed -> Fan ON
+//   GPIO26 LOW  -> Relay de-energized / circuit open -> Fan OFF (Power Cut)
+// (Matches Active-HIGH relay modules or Active-LOW modules wired across COM-NC)
+#define RELAY_FAN_ON_LEVEL   HIGH
+#define RELAY_FAN_OFF_LEVEL  LOW
 
 void setRelay(bool on) {
+  pinMode(PIN_RELAY, OUTPUT);
   if (on) {
-    pinMode(PIN_RELAY, OUTPUT);
-    digitalWrite(PIN_RELAY, LOW);
-    Serial.println("RELAY ON");
+    digitalWrite(PIN_RELAY, RELAY_FAN_ON_LEVEL);
+    Serial.println(F("[RELAY] Fan ON (GPIO26=HIGH)"));
   } else {
-    pinMode(PIN_RELAY, OUTPUT);
-    digitalWrite(PIN_RELAY, HIGH);
-#if RELAY_RELEASE_FOR_OFF
-    pinMode(PIN_RELAY, INPUT);
-#endif
-    Serial.println("RELAY OFF");
+    digitalWrite(PIN_RELAY, RELAY_FAN_OFF_LEVEL);
+    Serial.println(F("[RELAY] Fan OFF / Power Cut (GPIO26=LOW)"));
   }
 }
 
@@ -414,6 +561,19 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
   tempSensor.begin();
   tempSensor.setWaitForConversion(false);
   tempSensor.requestTemperatures();
+
+#if USE_CURRENT
+  if (!adsDetected) {
+    Wire.beginTransmission(ADS1115_I2C_ADDR);
+    if (Wire.endTransmission() == 0) {
+      if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
+        ads.setGain(GAIN_ONE);
+        adsDetected = true;
+        Serial.println(F("[ADC INIT] ADS1115 detected at 0x48"));
+      }
+    }
+  }
+#endif
 
   loadBaseline();
 
@@ -489,6 +649,20 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       currentTempC = tempC;
 
       float currentA = 0.0f;
+      bool currentValid = false;
+      int16_t rawAdcVal = 0;
+      float vDividedVal = 0.0f;
+      float vSensorVal = 0.0f;
+
+#if USE_CURRENT
+      currentValid = readCurrentSensor(currentA, rawAdcVal, vDividedVal, vSensorVal);
+      latestRawAdc = rawAdcVal;
+      latestVDivided = vDividedVal;
+      latestVSensor = vSensorVal;
+      latestCurrentValid = currentValid;
+      latestCurrentA = currentA;
+#endif
+
       bool sensorsHealthy = mpuOk && isfinite(tempC);
 
       compute_vibration_metrics(rawAx, rawAy, rawAz, &vibRms, bandEnergies, &dominantFreq);
@@ -592,9 +766,9 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
         hardLimitThresh = limitMaxVibRms;
       }
 #if USE_CURRENT
-      else if (currentA >= limitMaxCurrent) {
+      else if (currentValid && currentA >= limitMaxCurrent) {
         hardSafetyViolated = true;
-        strncpy(hardLimitReason, "hard_limit", sizeof(hardLimitReason));
+        strncpy(hardLimitReason, "hard_limit_curr", sizeof(hardLimitReason));
         hardLimitVal = currentA;
         hardLimitThresh = limitMaxCurrent;
       }
@@ -788,12 +962,19 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
           stateNames[previousState], stateNames[currentState], stateReason, reasonVal, reasonLimit);
       }
 
-      bool relayEnergized = false;
-      if (isLatched || currentState == STATE_CRITICAL || currentState == STATE_SENSOR_ERROR) {
+      // Fan policy:
+      // AUTO: fan ON in NORMAL, WARNING, CALIBRATING and SENSOR_ERROR.
+      // AUTO: fan OFF only in CRITICAL.
+      // Manual ON/OFF is honored, but CRITICAL always forces the fan OFF.
+      bool relayEnergized = true;
+      if (currentState == STATE_CRITICAL || isLatched) {
         relayEnergized = false;
+      } else if (fanMode == FAN_MODE_ON) {
+        relayEnergized = true;
       } else if (fanMode == FAN_MODE_OFF) {
         relayEnergized = false;
       } else {
+        // Automatic mode: keep the fan running unless state is CRITICAL.
         relayEnergized = true;
       }
 
@@ -874,7 +1055,11 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       snap.timestamp_s = nowSec;
       snap.temp_c = tempC;
       snap.vib_rms = vibRms;
-      snap.current_a = currentA;
+#if USE_CURRENT
+      snap.current_a = currentValid ? currentA : -1.0f;
+#else
+      snap.current_a = -1.0f;
+#endif
       snap.state = currentState;
       strncpy(snap.state_reason, stateReason, sizeof(snap.state_reason));
       snap.reason_val = reasonVal;
@@ -913,13 +1098,37 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       }
       int healthVal = constrain((int)round(smoothedHealthScore), 0, 100);
 
-      if (currentState == STATE_CALIBRATING) {
-        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C health=%d calib=%d\n",
-          stateStr, vibRms, currentTempC, healthVal, learningPct);
+      char currentStr[20];
+#if USE_CURRENT
+      if (latestCurrentValid) {
+        snprintf(currentStr, sizeof(currentStr), "%.3f A", latestCurrentA);
       } else {
-        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C health=%d\n",
-          stateStr, vibRms, currentTempC, healthVal);
+        snprintf(currentStr, sizeof(currentStr), "INVALID");
       }
+#else
+      snprintf(currentStr, sizeof(currentStr), "DISABLED");
+#endif
+
+      if (currentState == STATE_CALIBRATING) {
+        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C current= %s health=%d calib=%d\n",
+          stateStr, vibRms, currentTempC, currentStr, healthVal, learningPct);
+      } else {
+        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C current= %s health=%d\n",
+          stateStr, vibRms, currentTempC, currentStr, healthVal);
+      }
+
+#if USE_CURRENT
+      const char* currStatusStr = latestCurrentValid ? "VALID" : (adsDetected ? "INVALID_RANGE" : "DISCONNECTED");
+      Serial.printf("[ADC DIAG] fw=%s use_curr=1 ads1115=%s raw=%d vDiv=%.4fV vSens=%.4fV vZero=%.4fV current=%s status=%s\n",
+        FIRMWARE_VERSION,
+        adsDetected ? "DETECTED_0x48" : "NOT_DETECTED",
+        latestRawAdc,
+        latestVDivided,
+        latestVSensor,
+        currentZeroVolts,
+        currentStr,
+        currStatusStr);
+#endif
     }
   }
 }
@@ -940,7 +1149,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   ackDoc["ts"] = (uint32_t)(millis() / 1000);
 
   if (doc.containsKey("reset") && doc["reset"] == true) {
-    if (latestTelemetry.temp_c < limitMaxTemp && latestTelemetry.vib_rms < limitMaxVibRms) {
+    bool safeToReset = (latestTelemetry.temp_c < limitMaxTemp && latestTelemetry.vib_rms < limitMaxVibRms);
+#if USE_CURRENT
+    if (latestCurrentValid && latestCurrentA >= limitMaxCurrent) {
+      safeToReset = false;
+    }
+#endif
+    if (safeToReset) {
       isLatched = false;
       strncpy(latchedReason, "none", sizeof(latchedReason));
       latchedVal = 0.0f;
@@ -957,6 +1172,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     triggerLearning = true;
     ackDoc["learning_triggered"] = true;
   }
+
+#if USE_CURRENT
+  if (doc.containsKey("cal_current") && doc["cal_current"] == true) {
+    calibrateZeroCurrent();
+    ackDoc["current_zero_volts"] = currentZeroVolts;
+  }
+#endif
 
   if (doc.containsKey("mode")) {
     const char* m = doc["mode"];
@@ -1093,9 +1315,16 @@ void publishTelemetry(const TelemetrySnapshot &snap) {
   doc["temp_c"] = round(snap.temp_c * 100.0) / 100.0;
   doc["vib_rms"] = round(snap.vib_rms * 1000.0) / 1000.0;
 #if USE_CURRENT
-  doc["current_a"] = round(snap.current_a * 1000.0) / 1000.0;
+  if (snap.current_a >= 0.0f) {
+    doc["current_a"] = round(snap.current_a * 1000.0) / 1000.0;
+    doc["current_status"] = "ok";
+  } else {
+    doc["current_a"] = (char*)NULL;
+    doc["current_status"] = adsDetected ? "invalid" : "disconnected";
+  }
 #else
   doc["current_a"] = (char*)NULL;
+  doc["current_status"] = "disabled";
 #endif
 
   switch (snap.state) {
@@ -1306,10 +1535,62 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  esp_reset_reason_t resetReason = esp_reset_reason();
-  Serial.printf("ESP32 Reset Reason: %d (%s)\n", (int)resetReason, getResetReasonMeaning(resetReason));
+  Serial.println(F("\n========================================================"));
+  Serial.printf(  "  APEX APPLIANCE HEALTH MONITOR - %s\n", FIRMWARE_VERSION);
+  Serial.println(F("========================================================"));
 
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("[BOOT] Reset Reason: %d (%s)\n", (int)resetReason, getResetReasonMeaning(resetReason));
+  Serial.printf("[BOOT] Firmware Version: %s\n", FIRMWARE_VERSION);
+
+  // 1. I2C Bus & ADS1115 Detection Diagnostic
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.setClock(100000); // 100 kHz reliable clock for ADS1115 + MPU6050
+
+#if USE_CURRENT
+  Serial.println(F("[BOOT] Current Monitoring: ENABLED (USE_CURRENT=1)"));
+  Wire.beginTransmission(ADS1115_I2C_ADDR);
+  int adsErr = Wire.endTransmission();
+  if (adsErr == 0) {
+    if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
+      ads.setGain(GAIN_ONE);
+      adsDetected = true;
+      Serial.printf("[BOOT] ADS1115: DETECTED at address 0x%02X (Channel A0, Gain +/-4.096V, Divider 3.2x, Sens 0.185 V/A)\n", ADS1115_I2C_ADDR);
+
+      // Check if zero-current reference is calibrated in NVS:
+      prefs.begin("fan_base", false);
+      float savedZero = prefs.getFloat("cur_zero", 0.0f);
+      prefs.end();
+
+      if (savedZero >= 1.5f && savedZero <= 3.5f) {
+        currentZeroVolts = savedZero;
+        Serial.printf("[BOOT] Calibrated zero-current voltage loaded: %.4f V\n", currentZeroVolts);
+      } else {
+        Serial.println(F("[BOOT] No calibrated zero-current reference found in NVS; calibrating with 0A load..."));
+        calibrateZeroCurrent();
+      }
+    } else {
+      adsDetected = false;
+      Serial.printf("[BOOT] ADS1115: FAILED ads.begin() at 0x%02X\n", ADS1115_I2C_ADDR);
+    }
+  } else {
+    adsDetected = false;
+    Serial.printf("[BOOT] ADS1115: NOT DETECTED at address 0x%02X (I2C error %d - verify SDA=GPIO%d, SCL=GPIO%d, ADDR->GND)\n",
+      ADS1115_I2C_ADDR, adsErr, PIN_I2C_SDA, PIN_I2C_SCL);
+  }
+#else
+  Serial.println(F("[BOOT] Current Monitoring: DISABLED (USE_CURRENT=0)"));
+#endif
+
+  // 2. Initial Relay & Fan Policy Setup (Fan ON at boot) - PRESERVED UNCHANGED
   setRelay(true);
+  int relayPinLevel = digitalRead(PIN_RELAY);
+  Serial.printf("[BOOT] Relay GPIO26 Output: %d (%s)\n",
+    relayPinLevel, (relayPinLevel == RELAY_FAN_ON_LEVEL) ? "FAN ON (Circuit Closed)" : "FAN OFF (Power Cut)");
+
+  // 3. Initial System State Diagnostic
+  Serial.printf("[BOOT] Initial System State: %s (Fan policy: AUTO -> Fan ON)\n",
+    baselineReady ? "NORMAL" : "CALIBRATING");
 
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_LED_YEL, OUTPUT);
