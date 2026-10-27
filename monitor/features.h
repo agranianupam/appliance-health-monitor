@@ -5,6 +5,10 @@
 #define FEATURE_WINDOW_SIZE 128
 #define GRAVITY_MSS 9.80665f
 
+#ifndef USE_CURRENT
+#define USE_CURRENT 1
+#endif
+
 // ACS712 5A via ADS1115 (A0) with 22k/10k voltage divider
 #define CURRENT_VOLTAGE_DIVIDER_RATIO 3.2f       // (22k + 10k) / 10k = 3.20
 #define CURRENT_ACS712_SENSITIVITY    0.185f      // 185 mV/A (0.185 V/A) for ACS712-05B

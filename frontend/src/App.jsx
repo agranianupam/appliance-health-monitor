@@ -432,10 +432,10 @@ export default function App() {
           <div className={`state-hero-badge ${badgeTone}`}>
             <div className="badge-header">
               {isOffline ? <AlertTriangle size={36} /> :
-               (isCritical || isLatched) ? <ShieldAlert size={36} className="pulse-icon" /> :
-               isWarning ? <AlertTriangle size={36} /> :
-               isCalibrating ? <RotateCcw size={36} className="spin-icon" /> :
-               <ShieldCheck size={36} />}
+                (isCritical || isLatched) ? <ShieldAlert size={36} className="pulse-icon" /> :
+                  isWarning ? <AlertTriangle size={36} /> :
+                    isCalibrating ? <RotateCcw size={36} className="spin-icon" /> :
+                      <ShieldCheck size={36} />}
               <div>
                 <span className="badge-sub">MACHINE HEALTH STATUS</span>
                 <h2>{isOffline ? 'DEVICE OFFLINE' : (isLatched ? 'CRITICAL (LATCHED)' : (state === 'LEARNING' ? 'CALIBRATING' : state))}</h2>
@@ -530,22 +530,34 @@ export default function App() {
             <div className="metric-value">
               {!isFresh ? (
                 'Offline'
-              ) : currentTelemetry.current_status === 'disabled' || (currentTelemetry.current_a === null && !currentTelemetry.current_status) ? (
+              ) : String(currentTelemetry.current_status || '').toLowerCase() === 'disabled' ? (
                 'Disabled'
-              ) : currentTelemetry.current_status === 'invalid' || currentTelemetry.current_status === 'disconnected' ? (
-                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Invalid</span>
-              ) : Number.isFinite(currentTelemetry.current_a) && currentTelemetry.current_a !== null ? (
+              ) : ['invalid', 'disconnected', 'invalid_range'].includes(
+                String(currentTelemetry.current_status || '').toLowerCase()
+              ) ? (
+                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Sensor Error</span>
+              ) : currentTelemetry.current_a !== null &&
+                currentTelemetry.current_a !== undefined &&
+                currentTelemetry.current_a !== '' &&
+                Number.isFinite(Number(currentTelemetry.current_a)) &&
+                Number(currentTelemetry.current_a) >= 0 ? (
                 <>
-                  {currentTelemetry.current_a.toFixed(3)} <span>A</span>
+                  {Number(currentTelemetry.current_a).toFixed(3)} <span>A</span>
                 </>
               ) : (
-                'Disabled'
+                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Sensor Error</span>
               )}
             </div>
             <p className="metric-description">
-              {currentTelemetry.current_status === 'invalid' || currentTelemetry.current_status === 'disconnected'
-                ? 'Sensor error / disconnected'
-                : `Safety Limit: ${currLimitInput} A`}
+              {!isFresh
+                ? 'Waiting for device telemetry'
+                : String(currentTelemetry.current_status || '').toLowerCase() === 'disabled'
+                  ? 'Current monitoring disabled in firmware'
+                  : ['invalid', 'disconnected', 'invalid_range'].includes(
+                    String(currentTelemetry.current_status || '').toLowerCase()
+                  ) || currentTelemetry.current_a == null || !Number.isFinite(Number(currentTelemetry.current_a))
+                    ? 'Check ACS712, ADS1115, and current telemetry'
+                    : `Safety Limit: ${currLimitInput} A`}
             </p>
           </div>
 
