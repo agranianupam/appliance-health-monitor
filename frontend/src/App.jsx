@@ -530,12 +530,6 @@ export default function App() {
             <div className="metric-value">
               {!isFresh ? (
                 'Offline'
-              ) : String(currentTelemetry.current_status || '').toLowerCase() === 'disabled' ? (
-                'Disabled'
-              ) : ['invalid', 'disconnected', 'invalid_range'].includes(
-                String(currentTelemetry.current_status || '').toLowerCase()
-              ) ? (
-                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Sensor Error</span>
               ) : currentTelemetry.current_a !== null &&
                 currentTelemetry.current_a !== undefined &&
                 currentTelemetry.current_a !== '' &&
@@ -544,8 +538,10 @@ export default function App() {
                 <>
                   {Number(currentTelemetry.current_a).toFixed(3)} <span>A</span>
                 </>
+              ) : String(currentTelemetry.current_status || '').toLowerCase() === 'disabled' ? (
+                'Disabled'
               ) : (
-                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>Sensor Error</span>
+                <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>No reading</span>
               )}
             </div>
             <p className="metric-description">
@@ -553,10 +549,8 @@ export default function App() {
                 ? 'Waiting for device telemetry'
                 : String(currentTelemetry.current_status || '').toLowerCase() === 'disabled'
                   ? 'Current monitoring disabled in firmware'
-                  : ['invalid', 'disconnected', 'invalid_range'].includes(
-                    String(currentTelemetry.current_status || '').toLowerCase()
-                  ) || currentTelemetry.current_a == null || !Number.isFinite(Number(currentTelemetry.current_a))
-                    ? 'Check ACS712, ADS1115, and current telemetry'
+                  : ['invalid', 'disconnected', 'invalid_range'].includes(String(currentTelemetry.current_status || '').toLowerCase())
+                    ? 'Raw calculated value shown; sensor voltage is outside the expected range'
                     : `Safety Limit: ${currLimitInput} A`}
             </p>
           </div>

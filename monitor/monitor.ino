@@ -48,7 +48,7 @@ constexpr uint8_t MPU6050_REG_ACCEL_CONFIG = 0x1C;
 constexpr uint8_t MPU6050_REG_ACCEL_XOUT_H = 0x3B;
 constexpr float ACCEL_SCALE = 9.80665f / 4096.0f;
 
-#define DEMO_MODE 1
+#define DEMO_MODE 0 // Use normal statistical thresholds, not demo thresholds
 
 #if DEMO_MODE
 constexpr int CRIT_WINDOW_COUNT_REQ = 1;
@@ -96,6 +96,7 @@ struct TelemetrySnapshot {
   float temp_c;
   float vib_rms;
   float current_a;
+  bool current_valid;
   HealthState state;
   char state_reason[24];
   float reason_val;
@@ -256,11 +257,10 @@ bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivide
 
   // Validation: If ACS712 is disconnected / pulled to GND through 10k resistor (< 1.0V)
   // or rail shorted (> 4.5V) or negative ADC reading:
-  if (outVSensor < 1.0f || outVSensor > 4.5f || !isfinite(outVSensor) || avgRaw <= 0) {
-    outCurrentA = -1.0f;
-    return false;
-  }
+  const bool voltageInRange = (outVSensor >= 1.0f && outVSensor <= 4.5f && isfinite(outVSensor) && avgRaw > 0);
 
+  // Calculate a display value even when the reconstructed sensor voltage is out of range.
+  // The return value still indicates whether the reading is trusted for safety decisions.
   // True RMS current calculation:
   // For DC load: sqrt(I^2) = |I|
   // For AC load: true RMS across sampled waveform
@@ -268,8 +268,8 @@ bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivide
   if (rmsA < CURRENT_NOISE_DEADBAND_A) {
     rmsA = 0.0f; // Valid zero current
   }
-  outCurrentA = rmsA;
-  return true;
+  outCurrentA = isfinite(rmsA) ? rmsA : -1.0f;
+  return voltageInRange && isfinite(rmsA);
 }
 #endif
 
@@ -1056,9 +1056,11 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       snap.temp_c = tempC;
       snap.vib_rms = vibRms;
 #if USE_CURRENT
-      snap.current_a = currentValid ? currentA : -1.0f;
+      snap.current_a = (isfinite(currentA) && currentA >= 0.0f) ? currentA : -1.0f;
+      snap.current_valid = currentValid;
 #else
       snap.current_a = -1.0f;
+      snap.current_valid = false;
 #endif
       snap.state = currentState;
       strncpy(snap.state_reason, stateReason, sizeof(snap.state_reason));
@@ -1268,6 +1270,18 @@ void connectMqtt() {
       backfillDoc["ts"] = backfillSnap.timestamp_s;
       backfillDoc["temp_c"] = round(backfillSnap.temp_c * 100.0) / 100.0;
       backfillDoc["vib_rms"] = round(backfillSnap.vib_rms * 1000.0) / 1000.0;
+#if USE_CURRENT
+      if (backfillSnap.current_a >= 0.0f && isfinite(backfillSnap.current_a)) {
+        backfillDoc["current_a"] = round(backfillSnap.current_a * 1000.0) / 1000.0;
+        backfillDoc["current_status"] = backfillSnap.current_valid ? "ok" : "invalid_range";
+      } else {
+        backfillDoc["current_a"] = (char*)NULL;
+        backfillDoc["current_status"] = adsDetected ? "invalid" : "disconnected";
+      }
+#else
+      backfillDoc["current_a"] = (char*)NULL;
+      backfillDoc["current_status"] = "disabled";
+#endif
       backfillDoc["state"] = (backfillSnap.state == STATE_NORMAL) ? "NORMAL" :
                              (backfillSnap.state == STATE_WARNING) ? "WARNING" :
                              (backfillSnap.state == STATE_CRITICAL) ? "CRITICAL" :
@@ -1315,9 +1329,9 @@ void publishTelemetry(const TelemetrySnapshot &snap) {
   doc["temp_c"] = round(snap.temp_c * 100.0) / 100.0;
   doc["vib_rms"] = round(snap.vib_rms * 1000.0) / 1000.0;
 #if USE_CURRENT
-  if (snap.current_a >= 0.0f) {
+  if (snap.current_a >= 0.0f && isfinite(snap.current_a)) {
     doc["current_a"] = round(snap.current_a * 1000.0) / 1000.0;
-    doc["current_status"] = "ok";
+    doc["current_status"] = snap.current_valid ? "ok" : "invalid_range";
   } else {
     doc["current_a"] = (char*)NULL;
     doc["current_status"] = adsDetected ? "invalid" : "disconnected";
