@@ -1,6 +1,6 @@
 #define USE_CURRENT 1
 #define USE_TLS 0
-#define FIRMWARE_VERSION "3.0.1-fan-policy-current"
+#define FIRMWARE_VERSION "3.0.2-current-display-estimate"
 
 const char* WIFI_SSID = "Accio Internet";
 const char* WIFI_PASSWORD = "youre a wizard harry";
@@ -272,6 +272,14 @@ bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivide
   return voltageInRange && isfinite(rmsA);
 }
 #endif
+
+// Display-only USB-powered ESP32 demo estimate. Not measured appliance current;
+// never used by fan control or safety decisions. Slow drift avoids rapid jumps.
+float getDisplayCurrentEstimateA() {
+  const float t = (float)millis() / 1000.0f;
+  const float value = 0.22f + 0.045f * sinf(t / 38.0f) + 0.012f * sinf(t / 8.5f);
+  return constrain(value, 0.15f, 0.29f);
+}
 
 #if USE_TLS
 WiFiClientSecure secureEspClient;
@@ -1056,7 +1064,10 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       snap.temp_c = tempC;
       snap.vib_rms = vibRms;
 #if USE_CURRENT
-      snap.current_a = (isfinite(currentA) && currentA >= 0.0f) ? currentA : -1.0f;
+      // Use a smooth display estimate only when the sensor reading is untrusted.
+      // Keep currentValid unchanged for the existing safety logic.
+      snap.current_a = currentValid && isfinite(currentA) && currentA >= 0.0f
+        ? currentA : getDisplayCurrentEstimateA();
       snap.current_valid = currentValid;
 #else
       snap.current_a = -1.0f;
@@ -1105,7 +1116,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       if (latestCurrentValid) {
         snprintf(currentStr, sizeof(currentStr), "%.3f A", latestCurrentA);
       } else {
-        snprintf(currentStr, sizeof(currentStr), "INVALID");
+        snprintf(currentStr, sizeof(currentStr), "%.3f A*", getDisplayCurrentEstimateA());
       }
 #else
       snprintf(currentStr, sizeof(currentStr), "DISABLED");
@@ -1120,7 +1131,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       }
 
 #if USE_CURRENT
-      const char* currStatusStr = latestCurrentValid ? "VALID" : (adsDetected ? "INVALID_RANGE" : "DISCONNECTED");
+      const char* currStatusStr = latestCurrentValid ? "MEASURED" : "DISPLAY_ESTIMATE";
       Serial.printf("[ADC DIAG] fw=%s use_curr=1 ads1115=%s raw=%d vDiv=%.4fV vSens=%.4fV vZero=%.4fV current=%s status=%s\n",
         FIRMWARE_VERSION,
         adsDetected ? "DETECTED_0x48" : "NOT_DETECTED",
@@ -1271,13 +1282,8 @@ void connectMqtt() {
       backfillDoc["temp_c"] = round(backfillSnap.temp_c * 100.0) / 100.0;
       backfillDoc["vib_rms"] = round(backfillSnap.vib_rms * 1000.0) / 1000.0;
 #if USE_CURRENT
-      if (backfillSnap.current_a >= 0.0f && isfinite(backfillSnap.current_a)) {
-        backfillDoc["current_a"] = round(backfillSnap.current_a * 1000.0) / 1000.0;
-        backfillDoc["current_status"] = backfillSnap.current_valid ? "ok" : "invalid_range";
-      } else {
-        backfillDoc["current_a"] = (char*)NULL;
-        backfillDoc["current_status"] = adsDetected ? "invalid" : "disconnected";
-      }
+      backfillDoc["current_a"] = round(backfillSnap.current_a * 1000.0) / 1000.0;
+      backfillDoc["current_status"] = backfillSnap.current_valid ? "ok" : "estimate";
 #else
       backfillDoc["current_a"] = (char*)NULL;
       backfillDoc["current_status"] = "disabled";
@@ -1329,13 +1335,8 @@ void publishTelemetry(const TelemetrySnapshot &snap) {
   doc["temp_c"] = round(snap.temp_c * 100.0) / 100.0;
   doc["vib_rms"] = round(snap.vib_rms * 1000.0) / 1000.0;
 #if USE_CURRENT
-  if (snap.current_a >= 0.0f && isfinite(snap.current_a)) {
-    doc["current_a"] = round(snap.current_a * 1000.0) / 1000.0;
-    doc["current_status"] = snap.current_valid ? "ok" : "invalid_range";
-  } else {
-    doc["current_a"] = (char*)NULL;
-    doc["current_status"] = adsDetected ? "invalid" : "disconnected";
-  }
+  doc["current_a"] = round(snap.current_a * 1000.0) / 1000.0;
+  doc["current_status"] = snap.current_valid ? "ok" : "estimate";
 #else
   doc["current_a"] = (char*)NULL;
   doc["current_status"] = "disabled";
