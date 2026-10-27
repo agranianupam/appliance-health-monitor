@@ -9,11 +9,10 @@
 #define USE_CURRENT 1
 #endif
 
-// ACS712 5A via ADS1115 (A0) with 22k/10k voltage divider
-#define CURRENT_VOLTAGE_DIVIDER_RATIO 3.2f       // (22k + 10k) / 10k = 3.20
-#define CURRENT_ACS712_SENSITIVITY    0.185f      // 185 mV/A (0.185 V/A) for ACS712-05B
-#define CURRENT_NOMINAL_ZERO_V        2.50f      // Nominal quiescent midpoint voltage (Vcc/2)
-#define CURRENT_NOISE_DEADBAND_A      0.025f     // Clamps noise below 25 mA to 0.000 A
+#define CURRENT_VOLTAGE_DIVIDER_RATIO 3.2f
+#define CURRENT_ACS712_SENSITIVITY    0.185f
+#define CURRENT_NOMINAL_ZERO_V        2.50f
+#define CURRENT_NOISE_DEADBAND_A      0.025f
 
 static inline float compute_acs712_current(float v_adc, float v_zero, float divider_ratio, float sensitivity, float deadband) {
   float v_sensor = v_adc * divider_ratio;
@@ -174,7 +173,6 @@ static inline void extract_features(
     if (az[i] > max_z) max_z = az[i];
   }
 
-  // 1. vib_rms of dynamic acceleration
   float sum_dyn_sq = 0.0f;
   float peak_dyn = 0.0f;
   for (int i = 0; i < 128; i++) {
@@ -185,7 +183,6 @@ static inline void extract_features(
   float vib_rms = sqrtf(sum_dyn_sq / 128.0f);
   out_features[0] = vib_rms;
 
-  // 2. per-axis standard deviation
   float mean_x = sum_ax / 128.0f;
   float mean_y = sum_ay / 128.0f;
   float mean_z = sum_az / 128.0f;
@@ -199,15 +196,12 @@ static inline void extract_features(
   out_features[2] = sqrtf(sum_y_sq / 128.0f);
   out_features[3] = sqrtf(sum_z_sq / 128.0f);
 
-  // 3. per-axis peak-to-peak
   out_features[4] = max_x - min_x;
   out_features[5] = max_y - min_y;
   out_features[6] = max_z - min_z;
 
-  // 4. crest factor
   out_features[7] = peak_dyn / (vib_rms + 1e-5f);
 
-  // 5. 4 FFT band energies on dyn_accel (zero-mean)
   float dyn_mean = 0.0f;
   for (int i = 0; i < 128; i++) dyn_mean += dyn[i];
   dyn_mean /= 128.0f;
@@ -231,11 +225,9 @@ static inline void extract_features(
   out_features[10] = b2;
   out_features[11] = b3;
 
-  // 6. Temperature mean & slope (deg C per min)
   out_features[12] = temp_c;
   out_features[13] = (temp_c - temp_prev) / 1.28f * 60.0f;
 
-  // 7. Current mean & RMS
   out_features[14] = current_a;
   out_features[15] = current_a;
 }

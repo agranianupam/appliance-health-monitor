@@ -148,7 +148,6 @@ export default function App() {
       connectTimeout: 5000,
       reconnectPeriod: 3000
     };
-
     if (MQTT_USER && MQTT_USER.trim()) {
       options.username = MQTT_USER;
       options.password = MQTT_PASS;
@@ -183,7 +182,6 @@ export default function App() {
 
         if (subtopic === 'telemetry') {
           const nowTime = new Date().toLocaleTimeString();
-
           setDeviceData(prev => ({
             ...prev,
             [devId]: {
@@ -200,38 +198,20 @@ export default function App() {
                 time: nowTime,
                 temp_c: data.temp_c,
                 vib_rms: data.vib_rms,
-                current_a: Number.isFinite(Number(data.current_a)) ? Number(data.current_a) : null,
+                current_a: data.current_a !== null && data.current_a !== undefined && data.current_a !== '' && Number.isFinite(Number(data.current_a)) && Number(data.current_a) >= 0 ? Number(data.current_a) : null,
                 health_score: data.health_score
               }
             ]);
           }
 
           const prevState = lastStateMapRef.current[devId];
-
           if (data.state && data.state !== prevState) {
             lastStateMapRef.current[devId] = data.state;
-
-            if (
-              data.state === 'CRITICAL' ||
-              data.state === 'WARNING' ||
-              data.state === 'SENSOR_ERROR' ||
-              data.state === 'CALIBRATING' ||
-              data.state === 'LEARNING'
-            ) {
-              const reasonStr = data.state_reason || (
-                data.state === 'CALIBRATING' || data.state === 'LEARNING'
-                  ? 'baseline calibration triggered'
-                  : 'threshold exceeded'
-              );
-
-              const detailStr = (
-                data.reason_val !== undefined &&
-                data.reason_limit !== undefined &&
-                data.reason_limit !== 0
-              )
+            if (data.state === 'CRITICAL' || data.state === 'WARNING' || data.state === 'SENSOR_ERROR' || data.state === 'CALIBRATING' || data.state === 'LEARNING') {
+              const reasonStr = data.state_reason || (data.state === 'CALIBRATING' || data.state === 'LEARNING' ? 'baseline calibration triggered' : 'threshold exceeded');
+              const detailStr = (data.reason_val !== undefined && data.reason_limit !== undefined && data.reason_limit !== 0)
                 ? ` (${data.reason_val} vs limit ${data.reason_limit})`
                 : '';
-
               setEvents(prev => [
                 {
                   id: Date.now(),
@@ -246,8 +226,7 @@ export default function App() {
             }
           }
         } else if (subtopic === 'status') {
-          const isOnline = msgStr.trim().toLowerCase() === 'online';
-
+          const isOnline = (msgStr.trim().toLowerCase() === 'online');
           setDeviceData(prev => ({
             ...prev,
             [devId]: {
@@ -276,7 +255,6 @@ export default function App() {
       alert("MQTT broker disconnected");
       return;
     }
-
     const topic = `${MQTT_PREFIX}/${activeDeviceId}/command`;
     mqttClient.publish(topic, JSON.stringify(cmdObj));
   };
@@ -295,7 +273,6 @@ export default function App() {
       setTimeout(() => setAckNotice(null), 3000);
       return;
     }
-
     if (window.confirm("Start 3-minute baseline calibration? Ensure the fan is firmly mounted and operating normally.")) {
       sendDeviceCommand({ calibrate: true });
     }
@@ -303,13 +280,11 @@ export default function App() {
 
   const handleApplyLimits = () => {
     setIsApplyingLimits(true);
-
     sendDeviceCommand({
       limit_temp: parseFloat(tempLimitInput),
       limit_vib: parseFloat(vibLimitInput),
       limit_curr: parseFloat(currLimitInput)
     });
-
     setTimeout(() => setIsApplyingLimits(false), 1200);
   };
 
@@ -332,30 +307,13 @@ export default function App() {
 
   let badgeColor = '#65d9a9';
   let badgeTone = 'good';
+  if (isOffline) { badgeColor = '#94a3b8'; badgeTone = 'offline'; }
+  else if (isWarning) { badgeColor = '#f0c16d'; badgeTone = 'warn'; }
+  else if (isCritical || isLatched) { badgeColor = '#ff777e'; badgeTone = 'critical'; }
+  else if (isCalibrating) { badgeColor = '#50b8e7'; badgeTone = 'calibrating'; }
+  else if (isSensorError) { badgeColor = '#ff9f68'; badgeTone = 'critical'; }
 
-  if (isOffline) {
-    badgeColor = '#94a3b8';
-    badgeTone = 'offline';
-  } else if (isWarning) {
-    badgeColor = '#f0c16d';
-    badgeTone = 'warn';
-  } else if (isCritical || isLatched) {
-    badgeColor = '#ff777e';
-    badgeTone = 'critical';
-  } else if (isCalibrating) {
-    badgeColor = '#50b8e7';
-    badgeTone = 'calibrating';
-  } else if (isSensorError) {
-    badgeColor = '#ff9f68';
-    badgeTone = 'critical';
-  }
-
-  const bandNames = [
-    "1-10 Hz (Looseness)",
-    "10-25 Hz (Harmonics)",
-    "25-40 Hz (1X Rotation)",
-    "40-50 Hz (High Freq)"
-  ];
+  const bandNames = ["1-10 Hz (Looseness)", "10-25 Hz (Harmonics)", "25-40 Hz (1X Rotation)", "40-50 Hz (High Freq)"];
 
   return (
     <div className="app-shell">
@@ -371,7 +329,6 @@ export default function App() {
         </div>
 
         <p className="side-section">TARGET APPLIANCE</p>
-
         <div className="device-selector-wrap">
           <Layers size={14} className="device-select-icon" />
           <select
@@ -386,7 +343,6 @@ export default function App() {
         </div>
 
         <p className="side-section" style={{ marginTop: '24px' }}>TELEMETRY STATUS</p>
-
         <div className="sidebar-stat-box">
           <div className="stat-line">
             <span>Broker:</span>
@@ -435,11 +391,9 @@ export default function App() {
             <div className={`connection-pill ${isMqttConnected ? 'connected' : ''}`}>
               <span /> {isMqttConnected ? 'MQTT CONNECTED' : 'DISCONNECTED'}
             </div>
-
             <div className={`live-pill ${isFresh ? 'live' : 'offline'}`}>
               <span className="live-dot" /> {isFresh ? 'LIVE TELEMETRY' : 'DEVICE OFFLINE'}
             </div>
-
             {ackNotice && <div className="ack-banner">{ackNotice}</div>}
           </div>
         </header>
@@ -453,7 +407,6 @@ export default function App() {
                 <span>Critical threshold exceeded. Power is cut and relay is locked open until cleared.</span>
               </div>
             </div>
-
             <button className="btn-reset-latch" onClick={handleResetLatch}>
               <Unlock size={16} /> RESET LATCH
             </button>
@@ -466,14 +419,12 @@ export default function App() {
               <span><RotateCcw size={14} className="spin-icon" /> CALIBRATING BASELINE IN PROGRESS</span>
               <strong>{currentTelemetry.learning_pct || 0}%</strong>
             </div>
-
             <div className="progress-bar-track">
               <div
                 className="progress-bar-fill"
                 style={{ width: `${currentTelemetry.learning_pct || 0}%` }}
               />
             </div>
-
             <small>Recording 3 minutes of normal operational vibration and thermal dynamics.</small>
           </div>
         )}
@@ -486,13 +437,11 @@ export default function App() {
                   isWarning ? <AlertTriangle size={36} /> :
                     isCalibrating ? <RotateCcw size={36} className="spin-icon" /> :
                       <ShieldCheck size={36} />}
-
               <div>
                 <span className="badge-sub">MACHINE HEALTH STATUS</span>
                 <h2>{isOffline ? 'DEVICE OFFLINE' : (isLatched ? 'CRITICAL (LATCHED)' : (state === 'LEARNING' ? 'CALIBRATING' : state))}</h2>
               </div>
             </div>
-
             <p className="state-desc">
               {isOffline && "No real-time telemetry received from appliance within the last 10 seconds."}
               {!isOffline && isNormal && "Appliance is operating within healthy vibrational and thermal bounds."}
@@ -501,7 +450,6 @@ export default function App() {
               {!isOffline && isCalibrating && "Building dynamic statistical baseline from operational sensors."}
               {!isOffline && isSensorError && "Sensor disconnected or invalid data received. Check I2C wiring."}
             </p>
-
             <div className="state-meta-row">
               <span>Dominant Freq: <strong>{isFresh && currentTelemetry.dominant_freq_hz ? `${currentTelemetry.dominant_freq_hz.toFixed(1)} Hz` : '-'}</strong></span>
               <span>Primary Rise: <strong>{isFresh ? bandNames[currentTelemetry.rise_band || 0] : '-'}</strong></span>
@@ -520,7 +468,6 @@ export default function App() {
                 color={badgeColor}
               />
             </div>
-
             <div className="ttc-box">
               <span className="ttc-label"><Clock3 size={14} /> TIME TO CRITICAL</span>
               <strong className="ttc-value">
@@ -537,14 +484,12 @@ export default function App() {
           <div className="hint-icon-wrap">
             <Info size={20} />
           </div>
-
           <div className="hint-body">
             <span className="hint-label">VIBRATION DIAGNOSTIC HINT</span>
             <p className="hint-text">
               {isFresh ? (currentTelemetry.hint || "nominal baseline vibration") : "Device offline: No real-time telemetry received"}
             </p>
           </div>
-
           <div className="hint-freq-badge">
             <span>Peak: {isFresh && currentTelemetry.dominant_freq_hz ? `${currentTelemetry.dominant_freq_hz.toFixed(1)} Hz` : '-'}</span>
           </div>
@@ -556,14 +501,11 @@ export default function App() {
               <span className="metric-icon"><Waves size={20} /></span>
               <span className="metric-live"><span /> 100 Hz FFT</span>
             </div>
-
             <p className="metric-label">DYNAMIC VIBRATION RMS</p>
-
             <div className="metric-value">
               {isFresh && Number.isFinite(currentTelemetry.vib_rms) ? currentTelemetry.vib_rms.toFixed(3) : '-'}
               {isFresh && Number.isFinite(currentTelemetry.vib_rms) && <span>m/s²</span>}
             </div>
-
             <p className="metric-description">Safety Limit: {vibLimitInput} m/s²</p>
           </div>
 
@@ -572,14 +514,11 @@ export default function App() {
               <span className="metric-icon"><Thermometer size={20} /></span>
               <span className="metric-live"><span /> DS18B20</span>
             </div>
-
             <p className="metric-label">PROBE TEMPERATURE</p>
-
             <div className="metric-value">
               {isFresh && Number.isFinite(currentTelemetry.temp_c) ? currentTelemetry.temp_c.toFixed(1) : '-'}
               {isFresh && Number.isFinite(currentTelemetry.temp_c) && <span>°C</span>}
             </div>
-
             <p className="metric-description">Safety Limit: {tempLimitInput} °C</p>
           </div>
 
@@ -588,9 +527,7 @@ export default function App() {
               <span className="metric-icon"><Zap size={20} /></span>
               <span className="metric-live"><span /> ACS712</span>
             </div>
-
             <p className="metric-label">CURRENT CONSUMPTION</p>
-
             <div className="metric-value">
               {!isFresh ? (
                 'Offline'
@@ -608,7 +545,6 @@ export default function App() {
                 <span style={{ color: '#ff7e85', fontSize: '0.85em' }}>No reading</span>
               )}
             </div>
-
             <p className="metric-description">
               {!isFresh
                 ? 'Waiting for device telemetry'
@@ -625,14 +561,11 @@ export default function App() {
               <span className="metric-icon"><Radio size={20} /></span>
               <span className="metric-live"><span /> WiFi RSSI</span>
             </div>
-
             <p className="metric-label">WIFI SIGNAL STRENGTH</p>
-
             <div className="metric-value">
               {isFresh && currentTelemetry.rssi !== null ? currentTelemetry.rssi : '-'}
               {isFresh && currentTelemetry.rssi !== null && <span>dBm</span>}
             </div>
-
             <p className="metric-description">
               {isFresh && currentTelemetry.uptime_s !== null ? `Uptime: ${Math.round(currentTelemetry.uptime_s / 60)} min` : 'Device offline'}
             </p>
@@ -646,7 +579,6 @@ export default function App() {
                 <h3>Real-Time Telemetry Trends</h3>
                 <p>Adaptive baseline metrics and thermal trends</p>
               </div>
-
               <div className="live-tag"><span /> {isFresh ? 'STREAMING' : 'OFFLINE'}</div>
             </div>
 
@@ -699,7 +631,6 @@ export default function App() {
                 <RotateCcw size={15} className={isCalibrating ? 'spin-icon' : ''} />
                 <span>{isCalibrating ? 'Calibrating Baseline...' : 'Calibrate Baseline'}</span>
               </button>
-
               {isLatched && (
                 <div className="latch-notice-tag">
                   <ShieldAlert size={14} />
@@ -710,7 +641,6 @@ export default function App() {
 
             <div className="control-section">
               <label className="control-label"><Power size={14} /> FAN OPERATING MODE</label>
-
               <div className="button-group">
                 <button
                   className={`btn-mode ${currentTelemetry.mode === 'auto' ? 'active' : ''}`}
@@ -719,7 +649,6 @@ export default function App() {
                 >
                   AUTO
                 </button>
-
                 <button
                   className={`btn-mode ${currentTelemetry.mode === 'on' ? 'active' : ''}`}
                   onClick={() => handleSetFanMode('on')}
@@ -727,7 +656,6 @@ export default function App() {
                 >
                   FORCE ON
                 </button>
-
                 <button
                   className={`btn-mode ${currentTelemetry.mode === 'off' ? 'active' : ''}`}
                   onClick={() => handleSetFanMode('off')}
@@ -736,7 +664,6 @@ export default function App() {
                   FORCE OFF
                 </button>
               </div>
-
               {isLatched && <small className="warn-text">Device is latched: Manual commands locked until reset</small>}
             </div>
 
@@ -745,7 +672,6 @@ export default function App() {
                 <span>Max Temperature Limit</span>
                 <strong>{tempLimitInput} °C</strong>
               </div>
-
               <input
                 type="range" min="40" max="85" step="1"
                 value={tempLimitInput}
@@ -757,7 +683,6 @@ export default function App() {
                 <span>Max Vibration RMS Limit</span>
                 <strong>{vibLimitInput} m/s²</strong>
               </div>
-
               <input
                 type="range" min="1.0" max="10.0" step="0.2"
                 value={vibLimitInput}

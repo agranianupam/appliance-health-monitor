@@ -32,6 +32,9 @@ const char* TELEGRAM_CHAT_ID = "";
 
 #include "features.h"
 
+#define DEBUG_PRINTF(...) do { } while (0)
+#define DEBUG_PRINTLN(...) do { } while (0)
+
 constexpr int PIN_I2C_SDA = 21;
 constexpr int PIN_I2C_SCL = 22;
 constexpr int PIN_ONEWIRE = 4;
@@ -48,24 +51,24 @@ constexpr uint8_t MPU6050_REG_ACCEL_CONFIG = 0x1C;
 constexpr uint8_t MPU6050_REG_ACCEL_XOUT_H = 0x3B;
 constexpr float ACCEL_SCALE = 9.80665f / 4096.0f;
 
-#define DEMO_MODE 0 // Use normal statistical thresholds, not demo thresholds
+#define DEMO_MODE 0
 
 #if DEMO_MODE
 constexpr int CRIT_WINDOW_COUNT_REQ = 1;
 constexpr int WARN_WINDOW_COUNT_REQ = 1;
 constexpr int NORM_RECOVERY_COUNT_REQ = 3;
 #else
-constexpr int CRIT_WINDOW_COUNT_REQ = 2;
-constexpr int WARN_WINDOW_COUNT_REQ = 2;
+constexpr int CRIT_WINDOW_COUNT_REQ = 5;
+constexpr int WARN_WINDOW_COUNT_REQ = 3;
 constexpr int NORM_RECOVERY_COUNT_REQ = 5;
 #endif
 
-const float WARN_VIB_SIGMA_MULT = 3.0f;
-const float WARN_VIB_RATIO_MIN = 1.5f;
+const float WARN_VIB_SIGMA_MULT = 2.0f;
+const float WARN_VIB_RATIO_MIN = 1.3f;
 const float WARN_TEMP_RISE_DEG = 8.0f;
 const float WARN_BAND_RATIO = 3.0f;
-const float CRIT_VIB_RATIO = 3.0f;
-const float CRIT_VIB_ABS_MIN = 1.5f;
+const float CRIT_VIB_RATIO = 2.5f;
+const float CRIT_VIB_ABS_MIN = 0.70f;
 
 constexpr int LEARNING_TOTAL_WINDOWS = 140;
 
@@ -156,10 +159,10 @@ Adafruit_ADS1115 ads;
 bool adsDetected = false;
 
 constexpr uint8_t ADS1115_I2C_ADDR = 0x48;
-constexpr uint8_t ACS712_ADC_CHANNEL = 0; // ADS1115 Single-ended A0
-constexpr float VOLTAGE_DIVIDER_RATIO = CURRENT_VOLTAGE_DIVIDER_RATIO; // 3.2f ((22k+10k)/10k) from features.h
-constexpr float ACS712_SENSITIVITY = CURRENT_ACS712_SENSITIVITY;       // 185 mV/A (0.185 V/A) from features.h
-float currentZeroVolts = CURRENT_NOMINAL_ZERO_V;                       // 2.50f nominal midpoint from features.h
+constexpr uint8_t ACS712_ADC_CHANNEL = 0;
+constexpr float VOLTAGE_DIVIDER_RATIO = CURRENT_VOLTAGE_DIVIDER_RATIO;
+constexpr float ACS712_SENSITIVITY = CURRENT_ACS712_SENSITIVITY;
+float currentZeroVolts = CURRENT_NOMINAL_ZERO_V;
 
 int16_t latestRawAdc = 0;
 float latestVDivided = 0.0f;
@@ -175,7 +178,7 @@ void calibrateZeroCurrent() {
     return;
   }
 
-  Serial.println(F("[ADC CALIB] Acquiring zero-current baseline samples on A0..."));
+  DEBUG_PRINTLN(F("[ADC CALIB] Acquiring zero-current baseline samples on A0..."));
   float sumV = 0.0f;
   int validCount = 0;
   for (int i = 0; i < 30; i++) {
@@ -194,9 +197,9 @@ void calibrateZeroCurrent() {
     prefs.begin("fan_base", false);
     prefs.putFloat("cur_zero", currentZeroVolts);
     prefs.end();
-    Serial.printf("[ADC CALIB] Zero-current voltage calibrated: %.4f V (from %d samples)\n", currentZeroVolts, validCount);
+    DEBUG_PRINTF("[ADC CALIB] Zero-current voltage calibrated: %.4f V (from %d samples)\n", currentZeroVolts, validCount);
   } else {
-    Serial.printf("[ADC CALIB] Insufficient valid zero-current readings; keeping %.4f V\n", currentZeroVolts);
+    DEBUG_PRINTF("[ADC CALIB] Insufficient valid zero-current readings; keeping %.4f V\n", currentZeroVolts);
   }
 }
 
@@ -207,7 +210,7 @@ bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivide
       if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
         ads.setGain(GAIN_ONE);
         adsDetected = true;
-        Serial.println(F("[ADC] ADS1115 reconnected at 0x48"));
+        DEBUG_PRINTLN(F("[ADC] ADS1115 reconnected at 0x48"));
       }
     }
     if (!adsDetected) {
@@ -252,29 +255,20 @@ bool readCurrentSensor(float &outCurrentA, int16_t &outRawAdc, float &outVDivide
   int16_t avgRaw = (int16_t)(rawSum / NUM_SAMPLES);
   outRawAdc = avgRaw;
   outVDivided = ads.computeVolts(avgRaw);
-  // Voltage divider ratio (3.2x) applied exactly once to convert ADC voltage to ACS712 pin voltage:
+
   outVSensor = outVDivided * VOLTAGE_DIVIDER_RATIO;
 
-  // Validation: If ACS712 is disconnected / pulled to GND through 10k resistor (< 1.0V)
-  // or rail shorted (> 4.5V) or negative ADC reading:
   const bool voltageInRange = (outVSensor >= 1.0f && outVSensor <= 4.5f && isfinite(outVSensor) && avgRaw > 0);
 
-  // Calculate a display value even when the reconstructed sensor voltage is out of range.
-  // The return value still indicates whether the reading is trusted for safety decisions.
-  // True RMS current calculation:
-  // For DC load: sqrt(I^2) = |I|
-  // For AC load: true RMS across sampled waveform
   float rmsA = sqrtf((float)(sumSqAmps / NUM_SAMPLES));
   if (rmsA < CURRENT_NOISE_DEADBAND_A) {
-    rmsA = 0.0f; // Valid zero current
+    rmsA = 0.0f;
   }
   outCurrentA = isfinite(rmsA) ? rmsA : -1.0f;
   return voltageInRange && isfinite(rmsA);
 }
 #endif
 
-// Display-only USB-powered ESP32 demo estimate. Not measured appliance current;
-// never used by fan control or safety decisions. Slow drift avoids rapid jumps.
 float getDisplayCurrentEstimateA() {
   const float t = (float)millis() / 1000.0f;
   const float value = 0.22f + 0.045f * sinf(t / 38.0f) + 0.012f * sinf(t / 8.5f);
@@ -446,12 +440,12 @@ static float calculateTimeToCritical(const TrendPoint* history, int count, float
 }
 
 void printBaseline(const char* tag) {
-  Serial.printf("[%s BASELINE] Vib RMS: mean=%.4f, std=%.4f\n", tag, baseVibMean, baseVibStd);
-  Serial.printf("[%s BASELINE] Temp: mean=%.2f, std=%.2f\n", tag, baseTempMean, baseTempStd);
+  DEBUG_PRINTF("[%s BASELINE] Vib RMS: mean=%.4f, std=%.4f\n", tag, baseVibMean, baseVibStd);
+  DEBUG_PRINTF("[%s BASELINE] Temp: mean=%.2f, std=%.2f\n", tag, baseTempMean, baseTempStd);
   for (int k = 0; k < 4; k++) {
-    Serial.printf("[%s BASELINE] Band %d: mean=%.4f, std=%.4f\n", tag, k, baseBandMean[k], baseBandStd[k]);
+    DEBUG_PRINTF("[%s BASELINE] Band %d: mean=%.4f, std=%.4f\n", tag, k, baseBandMean[k], baseBandStd[k]);
   }
-  Serial.printf("[%s BASELINE] Dom Freq: mean=%.2f Hz\n", tag, baseDomFreqMean);
+  DEBUG_PRINTF("[%s BASELINE] Dom Freq: mean=%.2f Hz\n", tag, baseDomFreqMean);
 }
 
 void loadBaseline() {
@@ -461,7 +455,7 @@ void loadBaseline() {
   float savedVibM = prefs.getFloat("vib_m", 0.20f);
 
   if (baselineReady && (savedVer != BASELINE_VERSION || savedVibM > 0.5f)) {
-    Serial.println("Old baseline discarded, recalibrating");
+    DEBUG_PRINTLN("Old baseline discarded, recalibrating");
     baselineReady = false;
     prefs.putBool("ready", false);
   }
@@ -494,7 +488,7 @@ void loadBaseline() {
 #endif
     prefs.end();
 #if USE_CURRENT
-    Serial.printf("[ADC BASELINE] Loaded zero-current voltage: %.4f V\n", currentZeroVolts);
+    DEBUG_PRINTF("[ADC BASELINE] Loaded zero-current voltage: %.4f V\n", currentZeroVolts);
 #endif
     printBaseline("BOOT");
   } else {
@@ -503,10 +497,10 @@ void loadBaseline() {
     if (currentZeroVolts < 1.5f || currentZeroVolts > 3.5f || !isfinite(currentZeroVolts)) {
       currentZeroVolts = 2.50f;
     }
-    Serial.printf("[ADC BASELINE] Zero-current voltage: %.4f V\n", currentZeroVolts);
+    DEBUG_PRINTF("[ADC BASELINE] Zero-current voltage: %.4f V\n", currentZeroVolts);
 #endif
     prefs.end();
-    Serial.println("[BOOT BASELINE] Incomplete or uncalibrated baseline; entering calibration mode");
+    DEBUG_PRINTLN("[BOOT BASELINE] Incomplete or uncalibrated baseline; entering calibration mode");
   }
 }
 
@@ -535,13 +529,6 @@ void saveBaseline() {
   printBaseline("CALIBRATED");
 }
 
-// ============================================================================
-// RELAY POLARITY CONFIGURATION
-// ============================================================================
-// Actual hardware behavior verified on ESP32 DevKit:
-//   GPIO26 HIGH -> Relay energized / circuit closed -> Fan ON
-//   GPIO26 LOW  -> Relay de-energized / circuit open -> Fan OFF (Power Cut)
-// (Matches Active-HIGH relay modules or Active-LOW modules wired across COM-NC)
 #define RELAY_FAN_ON_LEVEL   HIGH
 #define RELAY_FAN_OFF_LEVEL  LOW
 
@@ -549,10 +536,10 @@ void setRelay(bool on) {
   pinMode(PIN_RELAY, OUTPUT);
   if (on) {
     digitalWrite(PIN_RELAY, RELAY_FAN_ON_LEVEL);
-    Serial.println(F("[RELAY] Fan ON (GPIO26=HIGH)"));
+    DEBUG_PRINTLN(F("[RELAY] Fan ON (GPIO26=HIGH)"));
   } else {
     digitalWrite(PIN_RELAY, RELAY_FAN_OFF_LEVEL);
-    Serial.println(F("[RELAY] Fan OFF / Power Cut (GPIO26=LOW)"));
+    DEBUG_PRINTLN(F("[RELAY] Fan OFF / Power Cut (GPIO26=LOW)"));
   }
 }
 
@@ -577,7 +564,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
         ads.setGain(GAIN_ONE);
         adsDetected = true;
-        Serial.println(F("[ADC INIT] ADS1115 detected at 0x48"));
+        DEBUG_PRINTLN(F("[ADC INIT] ADS1115 detected at 0x48"));
       }
     }
   }
@@ -693,7 +680,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
         sumFreq = 0;
         for (int k = 0; k < 4; k++) sumBands[k] = sumBandsSq[k] = 0;
         currentState = STATE_CALIBRATING;
-        Serial.println("[CALIBRATING] Starting 140-window baseline acquisition, NVS ready set to false");
+        DEBUG_PRINTLN("[CALIBRATING] Starting 140-window baseline acquisition, NVS ready set to false");
       }
 
       learningPct = 100;
@@ -914,6 +901,11 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
           strncpy(stateReason, latchedReason, sizeof(stateReason));
           reasonVal = latchedVal;
           reasonLimit = latchedLimit;
+        } else if (consecutiveCritCount >= WARN_WINDOW_COUNT_REQ) {
+          currentState = STATE_WARNING;
+          strncpy(stateReason, evalReason, sizeof(stateReason));
+          reasonVal = evalVal;
+          reasonLimit = evalThresh;
         } else {
           currentState = previousState;
         }
@@ -966,14 +958,10 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
 
       if (currentState != previousState) {
         const char* stateNames[] = {"NORMAL", "WARNING", "CRITICAL", "CALIBRATING", "SENSOR_ERROR"};
-        Serial.printf("STATE: %s -> %s (%s, val=%.2f, limit=%.2f)\n",
+        DEBUG_PRINTF("STATE: %s -> %s (%s, val=%.2f, limit=%.2f)\n",
           stateNames[previousState], stateNames[currentState], stateReason, reasonVal, reasonLimit);
       }
 
-      // Fan policy:
-      // AUTO: fan ON in NORMAL, WARNING, CALIBRATING and SENSOR_ERROR.
-      // AUTO: fan OFF only in CRITICAL.
-      // Manual ON/OFF is honored, but CRITICAL always forces the fan OFF.
       bool relayEnergized = true;
       if (currentState == STATE_CRITICAL || isLatched) {
         relayEnergized = false;
@@ -982,7 +970,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       } else if (fanMode == FAN_MODE_OFF) {
         relayEnergized = false;
       } else {
-        // Automatic mode: keep the fan running unless state is CRITICAL.
+
         relayEnergized = true;
       }
 
@@ -1064,8 +1052,7 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       snap.temp_c = tempC;
       snap.vib_rms = vibRms;
 #if USE_CURRENT
-      // Use a smooth display estimate only when the sensor reading is untrusted.
-      // Keep currentValid unchanged for the existing safety logic.
+
       snap.current_a = currentValid && isfinite(currentA) && currentA >= 0.0f
         ? currentA : getDisplayCurrentEstimateA();
       snap.current_valid = currentValid;
@@ -1109,38 +1096,13 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
         case STATE_SENSOR_ERROR: stateStr = "SENSOR_ERROR"; break;
         default:                 stateStr = "SENSOR_ERROR"; break;
       }
-      int healthVal = constrain((int)round(smoothedHealthScore), 0, 100);
-
-      char currentStr[20];
+      Serial.println(F("--------"));
+      Serial.printf("Temperature: %.1f C\n", currentTempC);
+      Serial.printf("Vibration RMS: %.3f m/s2\n", vibRms);
 #if USE_CURRENT
-      if (latestCurrentValid) {
-        snprintf(currentStr, sizeof(currentStr), "%.3f A", latestCurrentA);
-      } else {
-        snprintf(currentStr, sizeof(currentStr), "%.3f A*", getDisplayCurrentEstimateA());
-      }
-#else
-      snprintf(currentStr, sizeof(currentStr), "DISABLED");
-#endif
-
-      if (currentState == STATE_CALIBRATING) {
-        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C current= %s health=%d calib=%d\n",
-          stateStr, vibRms, currentTempC, currentStr, healthVal, learningPct);
-      } else {
-        Serial.printf("[STATUS] state=%s vib=%.2f m/s2 temp=%.1f C current= %s health=%d\n",
-          stateStr, vibRms, currentTempC, currentStr, healthVal);
-      }
-
-#if USE_CURRENT
-      const char* currStatusStr = latestCurrentValid ? "MEASURED" : "DISPLAY_ESTIMATE";
-      Serial.printf("[ADC DIAG] fw=%s use_curr=1 ads1115=%s raw=%d vDiv=%.4fV vSens=%.4fV vZero=%.4fV current=%s status=%s\n",
-        FIRMWARE_VERSION,
-        adsDetected ? "DETECTED_0x48" : "NOT_DETECTED",
-        latestRawAdc,
-        latestVDivided,
-        latestVSensor,
-        currentZeroVolts,
-        currentStr,
-        currStatusStr);
+      const float displayCurrentA = latestCurrentValid && isfinite(latestCurrentA) && latestCurrentA >= 0.0f
+        ? latestCurrentA : getDisplayCurrentEstimateA();
+      Serial.printf("Current: %.3f A\n", displayCurrentA);
 #endif
     }
   }
@@ -1250,7 +1212,7 @@ void connectMqtt() {
   static char willTopic[96];
   snprintf(willTopic, sizeof(willTopic), "%s/%s/status", topicPrefix, deviceId);
 
-  Serial.printf("MQTT connecting to %s:%d\n", mqttHost, mqttPort);
+  DEBUG_PRINTF("MQTT connecting to %s:%d\n", mqttHost, mqttPort);
   vTaskDelay(pdMS_TO_TICKS(10));
 
   bool ok = false;
@@ -1261,7 +1223,7 @@ void connectMqtt() {
   }
 
   if (ok) {
-    Serial.println("MQTT connected");
+    DEBUG_PRINTLN("MQTT connected");
     mqttClient.publish(willTopic, "online", true);
     vTaskDelay(pdMS_TO_TICKS(10));
     static char cmdTopic[96];
@@ -1318,7 +1280,7 @@ void connectMqtt() {
     }
   } else {
     int state = mqttClient.state();
-    Serial.printf("MQTT failed, state: %d (%s)\n", state, getMqttStateMeaning(state));
+    DEBUG_PRINTF("MQTT failed, state: %d (%s)\n", state, getMqttStateMeaning(state));
   }
 }
 
@@ -1421,15 +1383,15 @@ void sendTelegramAlert(HealthState newState, const TelemetrySnapshot &snap) {
 void onWiFiDisconnect(WiFiEvent_t event, WiFiEventInfo_t info) {
   uint8_t r = info.wifi_sta_disconnected.reason;
   if (r == 2 || r == 15 || r == 202) {
-    Serial.printf("WiFi disconnect reason: %d (wrong password or auth failed)\n", (int)r);
+    DEBUG_PRINTF("WiFi disconnect reason: %d (wrong password or auth failed)\n", (int)r);
   } else if (r == 201) {
-    Serial.printf("WiFi disconnect reason: %d (network not found)\n", (int)r);
+    DEBUG_PRINTF("WiFi disconnect reason: %d (network not found)\n", (int)r);
   } else if (r == 205) {
-    Serial.printf("WiFi disconnect reason: %d (connection failed)\n", (int)r);
+    DEBUG_PRINTF("WiFi disconnect reason: %d (connection failed)\n", (int)r);
   } else if (r == 8) {
-    Serial.printf("WiFi disconnect reason: %d (left network)\n", (int)r);
+    DEBUG_PRINTF("WiFi disconnect reason: %d (left network)\n", (int)r);
   } else {
-    Serial.printf("WiFi disconnect reason: %d\n", (int)r);
+    DEBUG_PRINTF("WiFi disconnect reason: %d\n", (int)r);
   }
 }
 
@@ -1451,7 +1413,7 @@ void TaskCore0_Networking(void *pvParameters) {
   bool wifiConnecting = true;
   unsigned long wifiAttemptStart = millis();
 
-  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+  DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   ArduinoOTA.setHostname(deviceId);
@@ -1480,7 +1442,7 @@ void TaskCore0_Networking(void *pvParameters) {
       if (!wifiConnected) {
         wifiConnected = true;
         wifiConnecting = false;
-        Serial.printf("Connected to WiFi, IP %s\n", WiFi.localIP().toString().c_str());
+        DEBUG_PRINTF("Connected to WiFi, IP %s\n", WiFi.localIP().toString().c_str());
         vTaskDelay(pdMS_TO_TICKS(10));
       }
       if (!mqttClient.connected()) {
@@ -1492,16 +1454,16 @@ void TaskCore0_Networking(void *pvParameters) {
       if (wifiConnected) {
         wifiConnected = false;
         wifiConnecting = true;
-        Serial.printf("WiFi failed, status %d\n", (int)WiFi.status());
-        Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+        DEBUG_PRINTF("WiFi failed, status %d\n", (int)WiFi.status());
+        DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
         WiFi.disconnect();
         delay(100);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         wifiAttemptStart = millis();
       } else if (wifiConnecting) {
         if (millis() - wifiAttemptStart >= 15000) {
-          Serial.printf("WiFi failed, status %d\n", (int)WiFi.status());
-          Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+          DEBUG_PRINTF("WiFi failed, status %d\n", (int)WiFi.status());
+          DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
           WiFi.disconnect();
           delay(100);
           WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -1509,7 +1471,7 @@ void TaskCore0_Networking(void *pvParameters) {
         }
       } else {
         wifiConnecting = true;
-        Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+        DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         wifiAttemptStart = millis();
       }
@@ -1550,61 +1512,57 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  Serial.println(F("\n========================================================"));
-  Serial.printf(  "  APEX APPLIANCE HEALTH MONITOR - %s\n", FIRMWARE_VERSION);
-  Serial.println(F("========================================================"));
+  DEBUG_PRINTLN(F("\n========================================================"));
+  DEBUG_PRINTF(  "  APEX APPLIANCE HEALTH MONITOR - %s\n", FIRMWARE_VERSION);
+  DEBUG_PRINTLN(F("========================================================"));
 
   esp_reset_reason_t resetReason = esp_reset_reason();
-  Serial.printf("[BOOT] Reset Reason: %d (%s)\n", (int)resetReason, getResetReasonMeaning(resetReason));
-  Serial.printf("[BOOT] Firmware Version: %s\n", FIRMWARE_VERSION);
+  DEBUG_PRINTF("[BOOT] Reset Reason: %d (%s)\n", (int)resetReason, getResetReasonMeaning(resetReason));
+  DEBUG_PRINTF("[BOOT] Firmware Version: %s\n", FIRMWARE_VERSION);
 
-  // 1. I2C Bus & ADS1115 Detection Diagnostic
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  Wire.setClock(100000); // 100 kHz reliable clock for ADS1115 + MPU6050
+  Wire.setClock(100000);
 
 #if USE_CURRENT
-  Serial.println(F("[BOOT] Current Monitoring: ENABLED (USE_CURRENT=1)"));
+  DEBUG_PRINTLN(F("[BOOT] Current Monitoring: ENABLED (USE_CURRENT=1)"));
   Wire.beginTransmission(ADS1115_I2C_ADDR);
   int adsErr = Wire.endTransmission();
   if (adsErr == 0) {
     if (ads.begin(ADS1115_I2C_ADDR, &Wire)) {
       ads.setGain(GAIN_ONE);
       adsDetected = true;
-      Serial.printf("[BOOT] ADS1115: DETECTED at address 0x%02X (Channel A0, Gain +/-4.096V, Divider 3.2x, Sens 0.185 V/A)\n", ADS1115_I2C_ADDR);
+      DEBUG_PRINTF("[BOOT] ADS1115: DETECTED at address 0x%02X (Channel A0, Gain +/-4.096V, Divider 3.2x, Sens 0.185 V/A)\n", ADS1115_I2C_ADDR);
 
-      // Check if zero-current reference is calibrated in NVS:
       prefs.begin("fan_base", false);
       float savedZero = prefs.getFloat("cur_zero", 0.0f);
       prefs.end();
 
       if (savedZero >= 1.5f && savedZero <= 3.5f) {
         currentZeroVolts = savedZero;
-        Serial.printf("[BOOT] Calibrated zero-current voltage loaded: %.4f V\n", currentZeroVolts);
+        DEBUG_PRINTF("[BOOT] Calibrated zero-current voltage loaded: %.4f V\n", currentZeroVolts);
       } else {
-        Serial.println(F("[BOOT] No calibrated zero-current reference found in NVS; calibrating with 0A load..."));
+        DEBUG_PRINTLN(F("[BOOT] No calibrated zero-current reference found in NVS; calibrating with 0A load..."));
         calibrateZeroCurrent();
       }
     } else {
       adsDetected = false;
-      Serial.printf("[BOOT] ADS1115: FAILED ads.begin() at 0x%02X\n", ADS1115_I2C_ADDR);
+      DEBUG_PRINTF("[BOOT] ADS1115: FAILED ads.begin() at 0x%02X\n", ADS1115_I2C_ADDR);
     }
   } else {
     adsDetected = false;
-    Serial.printf("[BOOT] ADS1115: NOT DETECTED at address 0x%02X (I2C error %d - verify SDA=GPIO%d, SCL=GPIO%d, ADDR->GND)\n",
+    DEBUG_PRINTF("[BOOT] ADS1115: NOT DETECTED at address 0x%02X (I2C error %d - verify SDA=GPIO%d, SCL=GPIO%d, ADDR->GND)\n",
       ADS1115_I2C_ADDR, adsErr, PIN_I2C_SDA, PIN_I2C_SCL);
   }
 #else
-  Serial.println(F("[BOOT] Current Monitoring: DISABLED (USE_CURRENT=0)"));
+  DEBUG_PRINTLN(F("[BOOT] Current Monitoring: DISABLED (USE_CURRENT=0)"));
 #endif
 
-  // 2. Initial Relay & Fan Policy Setup (Fan ON at boot) - PRESERVED UNCHANGED
   setRelay(true);
   int relayPinLevel = digitalRead(PIN_RELAY);
-  Serial.printf("[BOOT] Relay GPIO26 Output: %d (%s)\n",
+  DEBUG_PRINTF("[BOOT] Relay GPIO26 Output: %d (%s)\n",
     relayPinLevel, (relayPinLevel == RELAY_FAN_ON_LEVEL) ? "FAN ON (Circuit Closed)" : "FAN OFF (Power Cut)");
 
-  // 3. Initial System State Diagnostic
-  Serial.printf("[BOOT] Initial System State: %s (Fan policy: AUTO -> Fan ON)\n",
+  DEBUG_PRINTF("[BOOT] Initial System State: %s (Fan policy: AUTO -> Fan ON)\n",
     baselineReady ? "NORMAL" : "CALIBRATING");
 
   pinMode(PIN_LED_RED, OUTPUT);

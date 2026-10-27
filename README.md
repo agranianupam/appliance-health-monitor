@@ -74,25 +74,29 @@ On first boot, or whenever a `{"calibrate": true}` command is sent:
 
 ### Anomaly Rules & Threshold Constants
 ```cpp
-const float WARN_VIB_SIGMA_MULT = 3.0f;
-const float WARN_VIB_RATIO_MIN  = 1.5f;
+constexpr int CRIT_WINDOW_COUNT_REQ = 5;
+constexpr int WARN_WINDOW_COUNT_REQ = 3;
+constexpr int NORM_RECOVERY_COUNT_REQ = 5;
+
+const float WARN_VIB_SIGMA_MULT = 2.0f;
+const float WARN_VIB_RATIO_MIN  = 1.3f;
 const float WARN_TEMP_RISE_DEG  = 8.0f;
 const float WARN_BAND_RATIO     = 3.0f;
-const float CRIT_VIB_RATIO      = 3.0f;
-const float CRIT_VIB_ABS_MIN    = 1.5f;
+const float CRIT_VIB_RATIO      = 2.5f;
+const float CRIT_VIB_ABS_MIN    = 0.70f;
 ```
 
 - **WARNING State:**
-  - Dynamic vibration RMS exceeds baseline mean + 3 standard deviations (and at least 1.5x baseline mean)
+  - Dynamic vibration RMS exceeds baseline mean + 2 standard deviations (and at least 1.3x baseline mean)
   - OR temperature rises more than 8 deg C above baseline mean
   - OR any FFT band energy exceeds 3x its baseline mean
-  - Requires 2 consecutive windows to enter WARNING. Requires 5 consecutive normal windows to return to NORMAL.
+  - Requires 3 consecutive windows (approx 3.8s) to enter WARNING. Requires 5 consecutive normal windows to return to NORMAL.
 
 - **CRITICAL State (LATCHED):**
-  - Dynamic vibration RMS exceeds 3x baseline mean (and exceeds 1.5 m/s2 absolute minimum)
+  - Dynamic vibration RMS exceeds 2.5x baseline mean (and exceeds 0.70 m/s2 absolute minimum)
   - OR temperature exceeds the hard temperature limit (default 60 deg C)
   - OR vibration exceeds the hard vibration limit (default 4.0 m/s2)
-  - Requires 2 consecutive windows to trigger (or 1 window if hard limits are violated).
+  - Requires 5 consecutive windows (approx 6.4s) to trigger (or 1 window if hard limits are violated).
 
 ---
 
