@@ -26,6 +26,7 @@ async function initializeDatabase() {
       health_state TEXT NOT NULL,
       confidence REAL,
       relay_state TEXT NOT NULL,
+      telemetry_json TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);

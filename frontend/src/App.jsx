@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { getLatest, getHistory, getEvents, getStatus, getAck, sendCommand } from './api.js';
 import {
   Activity,
   AlertTriangle,
@@ -30,12 +31,6 @@ import {
   Tooltip
 } from 'recharts';
 
-const MQTT_BROKER = import.meta.env.VITE_MQTT_BROKER || 'broker.hivemq.com';
-const MQTT_PORT = import.meta.env.VITE_MQTT_PORT || '8000';
-const MQTT_PROTOCOL = import.meta.env.VITE_MQTT_PROTOCOL || 'ws';
-const MQTT_PREFIX = import.meta.env.VITE_MQTT_TOPIC_PREFIX || 'fanmon_x7k29q4';
-const MQTT_USER = import.meta.env.VITE_MQTT_USERNAME || '';
-const MQTT_PASS = import.meta.env.VITE_MQTT_PASSWORD || '';
 
 function CircularGauge({ value, min = 0, max = 100, unit = '', label, color = '#38c8ee', threshold = null }) {
   const radius = 42;
@@ -136,163 +131,83 @@ export default function App() {
     lastSeen: lastSeen
   };
 
+  const [serialStatus, setSerialStatus] = useState({serial_connected:false, serial_path:'COM8'});
+
   useEffect(() => {
-    if (!window.mqtt) {
-      return;
-    }
-
-    const wsUrl = MQTT_PROTOCOL + "://" + MQTT_BROKER + ":" + MQTT_PORT + "/mqtt";
-    const options = {
-      clientId: `dash_${Math.random().toString(16).substring(2, 8)}`,
-      clean: true,
-      connectTimeout: 5000,
-      reconnectPeriod: 3000
-    };
-    if (MQTT_USER && MQTT_USER.trim()) {
-      options.username = MQTT_USER;
-      options.password = MQTT_PASS;
-    }
-
-    const client = window.mqtt.connect(wsUrl, options);
-
-    client.on('connect', () => {
-      setBrokerConnected(true);
-      client.subscribe(`${MQTT_PREFIX}/+/telemetry`);
-      client.subscribe(`${MQTT_PREFIX}/+/status`);
-      client.subscribe(`${MQTT_PREFIX}/+/ack`);
-    });
-
-    client.on('error', () => {
-    });
-
-    client.on('close', () => {
-      setBrokerConnected(false);
-    });
-
-    client.on('message', (topic, payload) => {
+    let alive = true;
+    let previousAckAt = 0;
+    const refresh = async () => {
       try {
-        const msgStr = payload.toString();
-        const data = JSON.parse(msgStr);
-        const parts = topic.split('/');
-        const devId = parts[1];
-        const subtopic = parts[2];
-
-        setBrokerConnected(true);
-        setDiscoveredDevices(prev => prev.includes(devId) ? prev : [...prev, devId]);
-
-        if (subtopic === 'telemetry') {
-          const nowTime = new Date().toLocaleTimeString();
-          setDeviceData(prev => ({
-            ...prev,
-            [devId]: {
-              ...data,
-              online: true,
-              lastSeen: Date.now()
-            }
-          }));
-
-          if (devId === activeDeviceId) {
-            setTelemetryHistory(prev => [
-              ...prev.slice(-45),
-              {
-                time: nowTime,
-                temp_c: data.temp_c,
-                vib_rms: data.vib_rms,
-                current_a: data.current_a !== null && data.current_a !== undefined && data.current_a !== '' && Number.isFinite(Number(data.current_a)) && Number(data.current_a) >= 0 ? Number(data.current_a) : null,
-                health_score: data.health_score
-              }
-            ]);
-          }
-
-          const prevState = lastStateMapRef.current[devId];
-          if (data.state && data.state !== prevState) {
-            lastStateMapRef.current[devId] = data.state;
-            if (data.state === 'CRITICAL' || data.state === 'WARNING' || data.state === 'SENSOR_ERROR' || data.state === 'CALIBRATING' || data.state === 'LEARNING') {
-              const reasonStr = data.state_reason || (data.state === 'CALIBRATING' || data.state === 'LEARNING' ? 'baseline calibration triggered' : 'threshold exceeded');
-              const detailStr = (data.reason_val !== undefined && data.reason_limit !== undefined && data.reason_limit !== 0)
-                ? ` (${data.reason_val} vs limit ${data.reason_limit})`
-                : '';
-              setEvents(prev => [
-                {
-                  id: Date.now(),
-                  device_id: devId,
-                  state: data.state === 'LEARNING' ? 'CALIBRATING' : data.state,
-                  reason: reasonStr,
-                  time: nowTime,
-                  message: `${data.state === 'LEARNING' ? 'CALIBRATING' : data.state}: ${reasonStr}${detailStr}`
-                },
-                ...prev.slice(0, 29)
-              ]);
-            }
-          }
-        } else if (subtopic === 'status') {
-          const isOnline = (msgStr.trim().toLowerCase() === 'online');
-          setDeviceData(prev => ({
-            ...prev,
-            [devId]: {
-              ...(prev[devId] || {}),
-              online: isOnline,
-              lastSeen: isOnline ? Date.now() : prev[devId]?.lastSeen
-            }
-          }));
-        } else if (subtopic === 'ack') {
-          setAckNotice(`Acknowledged by ${devId} at ${new Date().toLocaleTimeString()}`);
+        const [latest, history, apiEvents, status, ack] = await Promise.all([
+          getLatest(), getHistory(), getEvents(), getStatus(), getAck()
+        ]);
+        if (!alive) return;
+        setSerialStatus(status || {serial_connected:false, serial_path:'COM8'});
+        setBrokerConnected(Boolean(status?.serial_connected));
+        if (latest && latest.device_id) {
+          const devId = latest.device_id;
+          setDiscoveredDevices(prev => prev.includes(devId) ? prev : [...prev, devId]);
+          setDeviceData(prev => ({...prev, [devId]: {...latest, online:Boolean(status?.serial_connected), lastSeen:latest.lastSeen || Date.now()}}));
+          setTelemetryHistory((history || []).map(row => ({
+            time: row.created_at ? new Date(row.created_at.replace(' ','T') + 'Z').toLocaleTimeString() : new Date().toLocaleTimeString(),
+            temp_c: row.temp_c ?? row.temperature_c ?? null,
+            vib_rms: row.vib_rms ?? row.vibration_rms_g ?? null,
+            current_a: row.current_a ?? row.current_rms_a ?? null,
+            health_score: row.health_score ?? null
+          })).slice(-50));
+        }
+        if (Array.isArray(apiEvents)) {
+          setEvents(apiEvents.map(ev => ({id:ev.id, device_id:ev.device_id, state:ev.state || ev.health_state, reason:ev.message, time:ev.created_at ? new Date(ev.created_at.replace(' ','T')+'Z').toLocaleTimeString() : '', message:ev.message})).slice(0,30));
+        }
+        if (previousAckAt === 0) {
+          previousAckAt = ack?.received_at || 1;
+        } else if (ack && ack.received_at && ack.received_at > previousAckAt) {
+          previousAckAt = ack.received_at;
+          setAckNotice(ack.error || ack.warning || ack.message || `Command acknowledged at ${new Date(ack.received_at).toLocaleTimeString()}`);
           setTimeout(() => setAckNotice(null), 4000);
         }
-      } catch (err) {
+      } catch (e) {
+        if (alive) { setBrokerConnected(false); setSerialStatus(prev => ({...prev, serial_connected:false, last_error:e.message})); }
       }
-    });
-
-    setMqttClient(client);
-
-    return () => {
-      client.end();
     };
-  }, [activeDeviceId]);
+    refresh();
+    const timer = setInterval(refresh, 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
-  const sendDeviceCommand = (cmdObj) => {
-    if (!mqttClient || !isMqttConnected) {
-      alert("MQTT broker disconnected");
-      return;
-    }
-    const topic = `${MQTT_PREFIX}/${activeDeviceId}/command`;
-    mqttClient.publish(topic, JSON.stringify(cmdObj));
-  };
-
-  const handleSetFanMode = (mode) => {
-    sendDeviceCommand({ mode });
-  };
-
-  const handleResetLatch = () => {
-    sendDeviceCommand({ reset: true });
-  };
-
-  const handleCalibrateBaseline = () => {
-    if (isLatched) {
-      setAckNotice("Device is latched: Reset the latch first");
+  const sendDeviceCommand = async (cmdObj) => {
+    try {
+      const result = await sendCommand(cmdObj);
+      if (result?.ack?.error) {
+        setAckNotice(`Command rejected: ${result.ack.error}`);
+      } else if (result?.ack?.message) {
+        setAckNotice(result.ack.message);
+      } else {
+        setAckNotice(result.success ? 'Command sent to ESP32' : 'Command failed');
+      }
       setTimeout(() => setAckNotice(null), 3000);
-      return;
-    }
-    if (window.confirm("Start 3-minute baseline calibration? Ensure the fan is firmly mounted and operating normally.")) {
-      sendDeviceCommand({ calibrate: true });
+    } catch (e) {
+      setAckNotice(`Local command failed: ${e.message}`);
+      setTimeout(() => setAckNotice(null), 5000);
     }
   };
 
+  const handleSetFanMode = (mode) => sendDeviceCommand({ mode });
+  const handleResetLatch = () => sendDeviceCommand({ reset: true });
+  const handleCalibrateBaseline = () => {
+    if (isLatched) { setAckNotice('Device is latched: Reset the latch first'); setTimeout(() => setAckNotice(null), 3000); return; }
+    if (window.confirm('Start baseline calibration? Ensure the fan is firmly mounted and operating normally.')) sendDeviceCommand({ calibrate: true });
+  };
   const handleApplyLimits = () => {
     setIsApplyingLimits(true);
-    sendDeviceCommand({
-      limit_temp: parseFloat(tempLimitInput),
-      limit_vib: parseFloat(vibLimitInput),
-      limit_curr: parseFloat(currLimitInput)
-    });
+    sendDeviceCommand({ limit_temp: parseFloat(tempLimitInput), limit_vib: parseFloat(vibLimitInput), limit_curr: parseFloat(currLimitInput) });
     setTimeout(() => setIsApplyingLimits(false), 1200);
   };
-
   const handleToggleBuzzer = () => {
-    const next = !buzzerMuted;
-    setBuzzerMuted(next);
-    sendDeviceCommand({ mute_buzzer: next });
+    const next = !buzzerMuted; setBuzzerMuted(next); sendDeviceCommand({ mute_buzzer: next });
   };
+
+  const isMqttConnected = brokerConnected || Boolean(serialStatus?.serial_connected);
 
   const state = isFresh ? (currentTelemetry.state || 'NORMAL') : 'DEVICE OFFLINE';
   const isNormal = state === 'NORMAL';
@@ -303,7 +218,6 @@ export default function App() {
   const isSensorError = state === 'SENSOR_ERROR';
   const isOffline = !isFresh || state === 'DEVICE OFFLINE';
   const isLatched = currentTelemetry.latched;
-  const isMqttConnected = brokerConnected || Boolean(mqttClient && mqttClient.connected) || isFresh;
 
   let badgeColor = '#65d9a9';
   let badgeTone = 'good';
@@ -346,11 +260,11 @@ export default function App() {
         <div className="sidebar-stat-box">
           <div className="stat-line">
             <span>Broker:</span>
-            <strong>{MQTT_BROKER}</strong>
+            <strong>{'Local USB connection'}</strong>
           </div>
           <div className="stat-line">
             <span>Transport:</span>
-            <strong>{MQTT_PROTOCOL.toUpperCase()} / {MQTT_PORT}</strong>
+            <strong>{'USB Serial / ' + (serialStatus.serial_path || 'COM8')}</strong>
           </div>
           <div className="stat-line">
             <span>Baseline:</span>
@@ -371,8 +285,8 @@ export default function App() {
           <div className="device-mini">
             <span className={`connection-dot ${isMqttConnected ? 'online' : ''}`} />
             <div>
-              <strong>MQTT WebSockets</strong>
-              <small>{isMqttConnected ? 'Connected & Subscribed' : 'Reconnecting...'}</small>
+              <strong>USB Serial</strong>
+              <small>{isMqttConnected ? 'Connected to ESP32' : (serialStatus.last_error || 'Waiting for ESP32')}</small>
             </div>
           </div>
           <p>FIRMWARE v3.0.0 (STATISTICAL)</p>
@@ -389,7 +303,7 @@ export default function App() {
 
           <div className="topbar-right">
             <div className={`connection-pill ${isMqttConnected ? 'connected' : ''}`}>
-              <span /> {isMqttConnected ? 'MQTT CONNECTED' : 'DISCONNECTED'}
+              <span /> {isMqttConnected ? 'LOCAL DEVICE CONNECTED' : 'SERIAL DISCONNECTED'}
             </div>
             <div className={`live-pill ${isFresh ? 'live' : 'offline'}`}>
               <span className="live-dot" /> {isFresh ? 'LIVE TELEMETRY' : 'DEVICE OFFLINE'}
@@ -616,7 +530,7 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <h3>Appliance Remote Controls</h3>
-                <p>Validated and acknowledged via MQTT</p>
+                <p>Commands sent locally through USB Serial</p>
               </div>
               <Sliders size={18} className="muted-icon" />
             </div>

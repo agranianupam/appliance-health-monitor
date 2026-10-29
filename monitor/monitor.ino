@@ -2,8 +2,8 @@
 #define USE_TLS 0
 #define FIRMWARE_VERSION "3.0.2-current-display-estimate"
 
-const char* WIFI_SSID = "Accio Internet";
-const char* WIFI_PASSWORD = "youre a wizard harry";
+const char* WIFI_SSID = "";
+const char* WIFI_PASSWORD = "";
 
 const char* MQTT_HOST = "broker.hivemq.com";
 const int   MQTT_PORT = USE_TLS ? 8883 : 1883;
@@ -313,6 +313,7 @@ float latchedLimit = 0.0f;
 volatile FanMode fanMode = FAN_MODE_AUTO;
 volatile bool buzzerMuted = false;
 volatile bool triggerLearning = false;
+volatile bool triggerReset = false;
 unsigned long lastCommandTime = 0;
 constexpr unsigned long COMMAND_WATCHDOG_TIMEOUT_MS = 60000;
 
@@ -636,6 +637,9 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
     if (sampleIdx >= 128) {
       sampleIdx = 0;
 
+      float reasonVal = 0.0f;
+      float reasonLimit = 0.0f;
+
       float tempC = tempSensor.getTempCByIndex(0);
       if (tempC < -50.0f || tempC > 125.0f || !isfinite(tempC)) {
         tempC = lastTempC;
@@ -665,6 +669,19 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
       lastTempC = tempC;
       if (vibRms > peakVibSinceStatus) {
         peakVibSinceStatus = vibRms;
+      }
+
+      if (triggerReset) {
+        triggerReset = false;
+        consecutiveCritCount = 0;
+        consecutiveWarnCount = 0;
+        consecutiveNormCount = NORM_RECOVERY_COUNT_REQ;
+        if (currentState == STATE_CRITICAL) {
+          currentState = STATE_NORMAL;
+          strncpy(stateReason, "none", sizeof(stateReason));
+          reasonVal = 0.0f;
+          reasonLimit = 0.0f;
+        }
       }
 
       if (triggerLearning) {
@@ -862,8 +879,8 @@ void TaskCore1_SamplingAndDecision(void *pvParameters) {
 
       HealthState previousState = currentState;
       strncpy(stateReason, "none", sizeof(stateReason));
-      float reasonVal = 0.0f;
-      float reasonLimit = 0.0f;
+      reasonVal = 0.0f;
+      reasonLimit = 0.0f;
 
       if (!sensorsHealthy) {
         currentState = STATE_SENSOR_ERROR;
@@ -1120,11 +1137,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   static StaticJsonDocument<256> ackDoc;
   ackDoc.clear();
+  ackDoc["type"] = "ack";
   ackDoc["device_id"] = deviceId;
   ackDoc["ts"] = (uint32_t)(millis() / 1000);
 
   if (doc.containsKey("reset") && doc["reset"] == true) {
-    bool safeToReset = (latestTelemetry.temp_c < limitMaxTemp && latestTelemetry.vib_rms < limitMaxVibRms);
+    float curTemp = 0.0f;
+    float curVib = 0.0f;
+    if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      curTemp = latestTelemetry.temp_c;
+      curVib = latestTelemetry.vib_rms;
+      xSemaphoreGive(telemetryMutex);
+    } else {
+      curTemp = latestTelemetry.temp_c;
+      curVib = latestTelemetry.vib_rms;
+    }
+    bool safeToReset = (curTemp < limitMaxTemp && curVib < limitMaxVibRms);
 #if USE_CURRENT
     if (latestCurrentValid && latestCurrentA >= limitMaxCurrent) {
       safeToReset = false;
@@ -1132,6 +1160,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 #endif
     if (safeToReset) {
       isLatched = false;
+      triggerReset = true;
       strncpy(latchedReason, "none", sizeof(latchedReason));
       latchedVal = 0.0f;
       latchedLimit = 0.0f;
@@ -1194,13 +1223,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     ackDoc["mute_buzzer"] = buzzerMuted;
   }
 
-  ackDoc["status"] = "OK";
+  ackDoc["status"] = ackDoc.containsKey("error") ? "ERROR" : "OK";
   static char ackBuffer[256];
   serializeJson(ackDoc, ackBuffer);
-  if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
-    mqttClient.publish(ackTopic, ackBuffer);
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
+  Serial.println(ackBuffer);
 }
 
 void connectMqtt() {
@@ -1285,13 +1311,10 @@ void connectMqtt() {
 }
 
 void publishTelemetry(const TelemetrySnapshot &snap) {
-  if (WiFi.status() != WL_CONNECTED || !mqttClient.connected()) return;
-
-  static char telemTopic[96];
-  snprintf(telemTopic, sizeof(telemTopic), "%s/%s/telemetry", topicPrefix, deviceId);
 
   static StaticJsonDocument<768> doc;
   doc.clear();
+  doc["type"] = "telemetry";
   doc["device_id"] = deviceId;
   doc["ts"] = snap.timestamp_s;
   doc["temp_c"] = round(snap.temp_c * 100.0) / 100.0;
@@ -1327,14 +1350,13 @@ void publishTelemetry(const TelemetrySnapshot &snap) {
 
   doc["fan_on"] = snap.fan_on;
   doc["mode"] = (snap.mode == FAN_MODE_AUTO) ? "auto" : ((snap.mode == FAN_MODE_ON) ? "on" : "off");
-  doc["rssi"] = WiFi.RSSI();
+  doc["rssi"] = (char*)NULL;
   doc["uptime_s"] = (uint32_t)(millis() / 1000);
   doc["fw_version"] = FIRMWARE_VERSION;
 
   static char buffer[768];
   serializeJson(doc, buffer);
-  mqttClient.publish(telemTopic, buffer);
-  vTaskDelay(pdMS_TO_TICKS(10));
+  Serial.println(buffer);
 }
 
 void sendTelegramAlert(HealthState newState, const TelemetrySnapshot &snap) {
@@ -1402,86 +1424,31 @@ void TaskCore0_Networking(void *pvParameters) {
   limitMaxCurrent = prefs.getFloat("lim_curr", 1.0f);
   prefs.end();
 
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true);
-  delay(100);
-
-  WiFi.onEvent(onWiFiDisconnect, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-
-  bool wifiConnected = false;
-  bool wifiConnecting = true;
-  unsigned long wifiAttemptStart = millis();
-
-  DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  ArduinoOTA.setHostname(deviceId);
-  ArduinoOTA.setPassword("apex2026");
-  ArduinoOTA.begin();
-
-#if USE_TLS
-  secureEspClient.setTimeout(10);
-  secureEspClient.setInsecure();
-  mqttClient.setClient(secureEspClient);
-#else
-  plainEspClient.setTimeout(10);
-  mqttClient.setClient(plainEspClient);
-#endif
-  mqttClient.setSocketTimeout(10);
-  mqttClient.setServer(mqttHost, mqttPort);
-  mqttClient.setCallback(mqttCallback);
-  mqttClient.setBufferSize(768);
-
+  static char commandBuffer[512];
+  size_t commandLength = 0;
   unsigned long lastTelemetryPublish = 0;
+  Serial.println(F("{\"type\":\"status\",\"status\":\"serial_ready\",\"device_id\":\"fan-01\"}"));
 
   for (;;) {
-    ArduinoOTA.handle();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      if (!wifiConnected) {
-        wifiConnected = true;
-        wifiConnecting = false;
-        DEBUG_PRINTF("Connected to WiFi, IP %s\n", WiFi.localIP().toString().c_str());
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-      if (!mqttClient.connected()) {
-        connectMqtt();
-      } else {
-        mqttClient.loop();
-      }
-    } else {
-      if (wifiConnected) {
-        wifiConnected = false;
-        wifiConnecting = true;
-        DEBUG_PRINTF("WiFi failed, status %d\n", (int)WiFi.status());
-        DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
-        WiFi.disconnect();
-        delay(100);
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        wifiAttemptStart = millis();
-      } else if (wifiConnecting) {
-        if (millis() - wifiAttemptStart >= 15000) {
-          DEBUG_PRINTF("WiFi failed, status %d\n", (int)WiFi.status());
-          DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
-          WiFi.disconnect();
-          delay(100);
-          WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-          wifiAttemptStart = millis();
+    while (Serial.available() > 0) {
+      char c = (char)Serial.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        commandBuffer[commandLength] = '\0';
+        if (commandLength > 1 && commandBuffer[0] == '{') {
+          mqttCallback((char*)"local/command", (byte*)commandBuffer, (unsigned int)commandLength);
         }
+        commandLength = 0;
+      } else if (commandLength < sizeof(commandBuffer) - 1) {
+        commandBuffer[commandLength++] = c;
       } else {
-        wifiConnecting = true;
-        DEBUG_PRINTF("Connecting to WiFi: %s\n", WIFI_SSID);
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        wifiAttemptStart = millis();
+        commandLength = 0; // discard oversized packet
       }
     }
 
     unsigned long now = millis();
-
     if (now - lastTelemetryPublish >= 2000) {
       lastTelemetryPublish = now;
-
       static TelemetrySnapshot currentSnap;
       bool hasSnap = false;
       if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1489,22 +1456,9 @@ void TaskCore0_Networking(void *pvParameters) {
         hasSnap = true;
         xSemaphoreGive(telemetryMutex);
       }
-
-      if (hasSnap) {
-        if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
-          publishTelemetry(currentSnap);
-        } else {
-          enqueueTelemetry(currentSnap);
-        }
-
-        if ((currentSnap.state == STATE_CRITICAL && lastAlertedState != STATE_CRITICAL) ||
-            (currentSnap.state == STATE_NORMAL && lastAlertedState == STATE_CRITICAL)) {
-          sendTelegramAlert(currentSnap.state, currentSnap);
-        }
-      }
+      if (hasSnap) publishTelemetry(currentSnap);
     }
-
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -1513,7 +1467,7 @@ void setup() {
   delay(300);
 
   DEBUG_PRINTLN(F("\n========================================================"));
-  DEBUG_PRINTF(  "  APEX APPLIANCE HEALTH MONITOR - %s\n", FIRMWARE_VERSION);
+  DEBUG_PRINTF(  "  APEX APPLIANCE HEALTH MONITOR (OFFLINE USB) - %s\n", FIRMWARE_VERSION);
   DEBUG_PRINTLN(F("========================================================"));
 
   esp_reset_reason_t resetReason = esp_reset_reason();
