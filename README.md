@@ -1,172 +1,187 @@
-# APEX - Adaptive Statistical Appliance Health Monitor
+# APEX: Adaptive Statistical Appliance Health Monitor
 
-A low-cost, edge-intelligent predictive maintenance monitor for small rotating appliances (5V DC fan) built on the ESP32. It uses statistical baseline calibration, 4-band FFT vibration analysis, and a safety latch, connected to a real-time React/MQTT WebSockets dashboard.
+A low-cost, edge-intelligent predictive maintenance monitor for rotating appliances (such as a 5V DC fan) powered by the ESP32. APEX performs statistical baseline calibration, 4-band FFT vibration analysis, and hardware safety latching, connected to a local Node.js backend and real-time React dashboard.
 
----
+## Key Features
 
-## 1. System Architecture
+- **Dual-Core Edge Intelligence**: Core 1 handles 100 Hz sensor sampling, FFT energy computation, baseline calibration, and safety latch decisions. Core 0 handles JSON telemetry serialization and bidirectional USB serial communication.
+- **Statistical Baseline Calibration**: Automatically learns healthy operating baseline values (mean and standard deviation) for dynamic vibration RMS, 4 FFT frequency bands, dominant frequency, and temperature.
+- **Staged Anomaly Detection**:
+  - **Warning**: Detects mild imbalance, rising friction, or abnormal temperature rise without cutting power.
+  - **Critical (Latched)**: Automatically cuts appliance power via relay when severe vibration or high temperature is detected. Requires an explicit user reset command to clear.
+- **Offline First**: Runs completely offline without cloud dependencies. The ESP32 streams telemetry directly over USB Serial to a local Node.js/Express server and SQLite database, displayed on a Vite React dashboard.
+
+## System Architecture
 
 ```
-               [ 100 Hz Micros Timing ]
-           MPU6050 (Clone 0x74) + DS18B20 + ADS1115
-                            |
-               +------------+------------+
-               |    ESP32 CORE 1 TASK    | (Priority 2)
-               |  * 128-sample window    |
-               |  * FFT & 4-Band Energy  |
-               |  * Baseline Calibration |
-               |  * Statistical Rules    |
-               |  * Safety Latch Logic   |
-               |  * Actuators (Relay/LED)|
-               +------------+------------+
-                            | Shared Telemetry Snapshot
-               +------------+------------+
-               |    ESP32 CORE 0 TASK    | (Priority 1)
-               |  * WiFi & WiFiManager   |
-               |  * TLS MQTT (PubSub)    |
-               |  * RAM Ring Buffer (10m)|
-               |  * ArduinoOTA Updates   |
-               |  * Telegram Alert Bot   |
-               +------------+------------+
-                            | (WSS / WebSockets)
-             HiveMQ Cloud / MQTT Broker (Port 8884)
-                            |
-               +------------+------------+
-               |   REACT VITE DASHBOARD  | (Browser-Direct)
-               |  * Radial Gauges        |
-               |  * State Badges         |
-               |  * Latch Banner & Reset |
-               |  * Calibration Progress |
-               |  * Diagnostic Hints     |
-               |  * Time to Critical TTC |
-               +-------------------------+
+                 [ 100 Hz Micros Timing ]
+       MPU6050 (Clone 0x74) + DS18B20 + ADS1115 / ACS712
+                         |
+            +------------+------------+
+            |    ESP32 CORE 1 TASK    | (Priority 2)
+            | * 128-sample window     |
+            | * 4-Band FFT Energy     |
+            | * Baseline Calibration  |
+            | * Statistical Rules     |
+            | * Safety Latch Logic    |
+            | * Relay & LED Control   |
+            +------------+------------+
+                         | Shared Telemetry Snapshot
+            +------------+------------+
+            |    ESP32 CORE 0 TASK    | (Priority 1)
+            | * USB Serial Streamer   |
+            | * JSON Command Receiver |
+            +------------+------------+
+                         | USB Serial (115200 Baud)
+            +------------+------------+
+            |   LOCAL BACKEND SERVER  | (Node.js & Express)
+            | * SerialPort Ingestion  |
+            | * SQLite Data Storage   |
+            | * REST API Endpoints    |
+            | * Static Web Server     |
+            +------------+------------+
+                         | HTTP (Port 5000)
+            +------------+------------+
+            |  VITE REACT DASHBOARD   | (Local Browser)
+            | * Real-time Gauges      |
+            | * State & Latch Status  |
+            | * Historical Charts     |
+            | * Manual / Auto Control |
+            | * Calibration & Resets  |
+            +-------------------------+
 ```
 
----
+## Hardware Wiring Reference
 
-## 2. Hardware Wiring Reference
-
-| Peripheral | ESP32 GPIO | Description / Configuration |
+| Peripheral | ESP32 GPIO | Description and Configuration |
 | :--- | :--- | :--- |
-| **MPU6050 (Clone)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Clone `WHO_AM_I = 0x74`. Read via direct I2C registers: Wake (`0x6B = 0x00`), DLPF ~21 Hz (`0x1A = 0x04`), Range +/-8g (`0x1C = 0x10`), 400 kHz clock. |
-| **DS18B20 Probe** | `GPIO 4` | 4.7k pull-up to 3.3V. Non-blocking conversion (spanned across 128-sample window). |
-| **ADS1115 (A0)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Address `0x48`, `GAIN_ONE` (+/-4.096V). Reads ACS712 via 22k/10k divider (ratio 10/32). Optional via `#define USE_CURRENT`. |
-| **Relay Module** | `GPIO 26` | `HIGH` = Fan ON (Energized), `LOW` = Fan OFF (Power Cut). Verified on DevKit. |
-| **Green LED** | `GPIO 32` | **NORMAL & CALIBRATING** indicator (330 ohm resistor). |
-| **Yellow LED** | `GPIO 33` | **WARNING** indicator (330 ohm resistor). |
-| **Red LED** | `GPIO 25` | **CRITICAL (LATCHED)** & **SENSOR ERROR** indicator. |
-| **Active Buzzer** | `GPIO 27` | **Active HIGH** (sounds during CRITICAL unless muted remotely). |
+| **MPU6050 (Clone)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Clone `WHO_AM_I = 0x74`. Direct I2C registers: Wake (`0x6B = 0x00`), DLPF ~21 Hz (`0x1A = 0x04`), Range +/-8g (`0x1C = 0x10`), 400 kHz clock. |
+| **DS18B20 Probe** | `GPIO 4` | OneWire temperature probe with 4.7k pull-up to 3.3V. Non-blocking conversion across 128-sample window. |
+| **ADS1115 (A0)** | SDA = `GPIO 21`<br>SCL = `GPIO 22` | Address `0x48`, `GAIN_ONE` (+/-4.096V). Reads ACS712 current via 22k/10k voltage divider (ratio 10/32). Optional via `#define USE_CURRENT`. |
+| **Relay Module** | `GPIO 26` | `HIGH` = Fan ON (Energized), `LOW` = Fan OFF (Power Cut). Controls fan power. |
+| **Green LED** | `GPIO 32` | Indicates NORMAL and CALIBRATING states (330 ohm resistor). |
+| **Yellow LED** | `GPIO 33` | Indicates WARNING state (330 ohm resistor). |
+| **Red LED** | `GPIO 25` | Indicates CRITICAL (LATCHED) and SENSOR ERROR states (330 ohm resistor). |
+| **Active Buzzer** | `GPIO 27` | Active HIGH. Sounds during CRITICAL state unless muted by command. |
 
----
-
-## 3. Statistical Baseline Calibration & Decision Rules
-
-### Baseline Calibration (First 3 Minutes)
-On first boot, or whenever a `{"calibrate": true}` command is sent:
-- The monitor enters `CALIBRATING` state for 3 minutes (140 windows of 128 samples).
-- The fan runs normally while the system accumulates the mean and standard deviation for:
-  - Dynamic vibration RMS (acceleration magnitude minus gravity)
-  - 4 FFT band energies: Band 0 (1-10 Hz), Band 1 (10-25 Hz), Band 2 (25-40 Hz), Band 3 (40-50 Hz)
-  - Dominant vibration frequency (Hz)
-  - Temperature (deg C)
-- At the end of 3 minutes, values are saved to NVS (`Preferences`) so they persist across power cycles.
-- Hard safety limits remain active during calibration.
-
-### Anomaly Rules & Threshold Constants
-```cpp
-constexpr int CRIT_WINDOW_COUNT_REQ = 5;
-constexpr int WARN_WINDOW_COUNT_REQ = 3;
-constexpr int NORM_RECOVERY_COUNT_REQ = 5;
-
-const float WARN_VIB_SIGMA_MULT = 2.0f;
-const float WARN_VIB_RATIO_MIN  = 1.3f;
-const float WARN_TEMP_RISE_DEG  = 8.0f;
-const float WARN_BAND_RATIO     = 3.0f;
-const float CRIT_VIB_RATIO      = 2.5f;
-const float CRIT_VIB_ABS_MIN    = 0.70f;
-```
-
-- **WARNING State:**
-  - Dynamic vibration RMS exceeds baseline mean + 2 standard deviations (and at least 1.3x baseline mean)
-  - OR temperature rises more than 8 deg C above baseline mean
-  - OR any FFT band energy exceeds 3x its baseline mean
-  - Requires 3 consecutive windows (approx 3.8s) to enter WARNING. Requires 5 consecutive normal windows to return to NORMAL.
-
-- **CRITICAL State (LATCHED):**
-  - Dynamic vibration RMS exceeds 2.5x baseline mean (and exceeds 0.70 m/s2 absolute minimum)
-  - OR temperature exceeds the hard temperature limit (default 60 deg C)
-  - OR vibration exceeds the hard vibration limit (default 4.0 m/s2)
-  - Requires 5 consecutive windows (approx 6.4s) to trigger (or 1 window if hard limits are violated).
-
----
-
-## 4. State & Actuator Behavior Table
+## Health States and Actuator Behavior
 
 | State | Relay Output | Green LED | Yellow LED | Red LED | Buzzer | Latch Behavior |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **NORMAL** | ON (Energized) | ON | OFF | OFF | OFF | Unlatched |
-| **CALIBRATING** | ON (Energized) | ON | OFF | OFF | OFF | Unlatched (Progress bar on UI) |
-| **WARNING** | ON (Energized) | OFF | ON | OFF | OFF | Unlatched (Warning on UI) |
-| **CRITICAL** | **OFF (Power Cut)** | OFF | OFF | **ON** | **ON** | **LATCHED** (Requires `{"reset": true}`) |
-| **SENSOR_ERROR**| ON (Energized) | OFF | OFF | **ON** | OFF | Unlatched (Auto-recovers when wired) |
+| **CALIBRATING** | ON (Energized) | ON | OFF | OFF | OFF | Unlatched (Progress bar shown on dashboard) |
+| **WARNING** | ON (Energized) | OFF | ON | OFF | OFF | Unlatched (Warning shown on dashboard) |
+| **CRITICAL** | **OFF (Power Cut)** | OFF | OFF | **ON** | **ON** | **LATCHED** (Requires `{"reset": true}` command) |
+| **SENSOR_ERROR** | ON (Energized) | OFF | OFF | **ON** | OFF | Unlatched (Recovers automatically when reconnected) |
 
----
+## Detection Logic and Decision Rules
 
-## 5. MQTT Remote Commands
+### 1. Baseline Calibration
+- Triggered automatically on first boot or on receiving `{"calibrate": true}`.
+- Runs for 140 windows of 128 samples (approximately 3 minutes) while the fan operates normally.
+- Computes mean and standard deviation for:
+  - Dynamic vibration RMS (acceleration magnitude minus gravity)
+  - 4 FFT frequency bands: Band 0 (1-10 Hz), Band 1 (10-25 Hz), Band 2 (25-40 Hz), Band 3 (40-50 Hz)
+  - Dominant vibration frequency (Hz)
+  - Operating temperature (deg C)
+- Baseline parameters are stored in non-volatile storage (NVS) via `Preferences` so they persist across power cycles.
 
-Commands are published as JSON to topic `<prefix>/<device_id>/command`:
+### 2. Warning State Rules
+The system enters WARNING if any condition holds for 3 consecutive windows (approx 3.8 seconds):
+- Dynamic vibration RMS exceeds baseline mean + (2.0 * sigma) and is at least 1.3x baseline mean.
+- Operating temperature rises by more than 8.0 deg C above baseline mean.
+- Any FFT band energy exceeds 3.0x its baseline mean.
+- Recovers back to NORMAL after 5 consecutive normal windows.
 
-| Command Payload | Purpose | Safety Rules |
+### 3. Critical State Rules (Latched)
+The system trips the safety latch, cuts relay power, and turns on alarm outputs if:
+- Dynamic vibration RMS exceeds 2.5x baseline mean and exceeds 0.70 m/s2 absolute minimum (requires 5 consecutive windows).
+- Dynamic vibration RMS exceeds the absolute hard vibration limit (default 4.0 m/s2).
+- Operating temperature exceeds the absolute hard temperature limit (default 60.0 deg C).
+- Once latched, the fan cannot be turned on until an explicit reset command is issued and sensor readings have dropped back below critical thresholds.
+
+## Serial and API Commands
+
+Commands can be sent via HTTP POST to `/api/commands` or written as JSON lines over USB Serial:
+
+| Command JSON | Description | Safety Behavior |
 | :--- | :--- | :--- |
-| `{"reset": true}` | Clear critical safety latch | Clears latch only if sensor values are below critical limits. |
-| `{"calibrate": true}` | Calibrate baseline | Triggers a fresh 3-minute baseline calibration cycle. |
-| `{"mode": "auto"}` | Set fan mode to auto | Ignored if device is currently latched. |
-| `{"mode": "on"}` | Force fan ON | Ignored if device is currently latched. |
-| `{"mode": "off"}` | Force fan OFF | Ignored if device is currently latched. |
-| `{"limit_temp": 65}` | Update hard temperature limit | Stored in NVS. Clamped between 35 and 90 deg C. |
-| `{"limit_vib": 5.0}` | Update hard vibration limit | Stored in NVS. Clamped between 1.0 and 15.0 m/s2. |
-| `{"mute_buzzer": true}`| Silence buzzer alarm | Keeps Red LED and Relay power cut active. |
+| `{"reset": true}` | Clears the critical safety latch | Clears latch only if current temperature and vibration are within safe limits. |
+| `{"calibrate": true}` | Starts a new calibration cycle | Runs a 3-minute baseline learning sequence and saves new statistics to NVS. |
+| `{"mode": "auto"}` | Sets fan control to automatic | Ignored while the appliance is latched. |
+| `{"mode": "on"}` | Forces the fan ON | Ignored while the appliance is latched. |
+| `{"mode": "off"}` | Forces the fan OFF | Ignored while the appliance is latched. |
+| `{"limit_temp": 65}` | Updates hard temperature limit (deg C) | Stored in NVS. Clamped between 35 and 90 deg C. |
+| `{"limit_vib": 5.0}` | Updates hard vibration limit (m/s2) | Stored in NVS. Clamped between 1.0 and 15.0 m/s2. |
+| `{"mute_buzzer": true}` | Silences active buzzer | Keeps relay cutoff and red LED alarm active. |
 
----
+## Getting Started
 
-## 6. Hardware Verification & Testing Checklist
+### 1. Flash the ESP32 Firmware
+1. Open `monitor/monitor.ino` in Arduino IDE or VS Code with ESP32 board support installed.
+2. Select target board: `ESP32 Dev Module`.
+3. Ensure required libraries are installed:
+   - `ArduinoJson` (v6)
+   - `OneWire`
+   - `DallasTemperature`
+   - `Adafruit ADS1X15` (if using ADS1115 current sensor)
+   - `arduinoFFT`
+4. Connect the ESP32 via USB and upload the sketch.
 
-### Test 1: Baseline Calibration
-1. Power on the ESP32 with the fan firmly mounted and running normally.
-2. The dashboard state displays `CALIBRATING` with a progress bar (0 to 100%).
-3. Relay stays ON, Green LED stays ON.
-4. After 3 minutes, state transitions automatically to `NORMAL`.
-5. Reboot the ESP32. Verify in Serial Monitor that the baseline is loaded from NVS without restarting calibration.
+### 2. Run the Offline Backend
+The backend connects to the ESP32 over USB Serial, persists telemetry into SQLite, and hosts the API and dashboard.
 
-### Test 2: Warning Detection (Mild Imbalance)
-1. Add a small piece of tape (~10 mm) to one blade tip of the fan.
-2. Observe telemetry: vibration RMS and Band 2 (25-40 Hz rotation band) increase.
-3. Yellow LED turns ON; dashboard displays `WARNING` and diagnostic hint:
-   `energy rising at rotation frequency: possible imbalance`.
-4. Relay remains ON.
-5. Remove the tape. After 5 consecutive normal windows, state returns to `NORMAL` and Green LED turns ON.
+```bash
+cd backend
+npm install
+# Set SERIAL_PORT if different from COM8 (for example: COM9 on Windows or /dev/ttyUSB0 on Linux)
+SERIAL_PORT=COM9 npm start
+```
 
-### Test 3: Critical State & Safety Latch
-1. Apply heavier tape or gently loosen the fan mounting bracket to create strong vibration.
-2. When vibration exceeds 3x baseline:
-   - State flips to `CRITICAL (LATCHED)`.
-   - Relay turns OFF immediately, cutting fan power.
-   - Red LED turns ON, Buzzer sounds.
-   - Dashboard displays red banner: `LATCHED - FAN POWER CUT`.
-3. Try sending manual command `{"mode": "on"}` from the dashboard. Verify that manual commands are blocked and the fan does not spin.
-4. Fix the fan, then click `RESET LATCH` (`{"reset": true}`).
-5. Verify latch clears, Relay re-energizes, and Green LED turns ON.
+On Windows PowerShell:
+```powershell
+cd backend
+$env:SERIAL_PORT="COM9"
+npm start
+```
 
-### Test 4: Offline WiFi Resilience
-1. While the fan is running in `NORMAL` state, power down or disconnect the Wi-Fi router.
-2. Observe the hardware:
-   - 100 Hz sampling on Core 1 continues with zero timing disruption.
-   - Green LED stays solid; relay stays energized.
-3. Tap or shake the fan: verify Yellow LED (Warning) or Red LED + Relay cutoff (Critical) triggers locally without network connection.
-4. Reconnect Wi-Fi: verify buffered readings are transmitted to the broker.
+Health check endpoint: `http://localhost:5000/api/health`
 
-### Test 5: Sensor Unplug / Fault Test
-1. Unplug the I2C SDA wire (GPIO 21).
-2. The firmware immediately detects I2C failure and transitions to `SENSOR_ERROR`.
-3. Relay turns OFF, Red LED turns ON, Buzzer stays OFF.
-4. Plug the SDA wire back in: verify the firmware recovers without requiring a manual reset.
+### 3. Build and View the Frontend Dashboard
+The frontend is built with React, Vite, Recharts, and Lucide Icons.
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+The built frontend files in `frontend/dist` are served directly by the backend at `http://localhost:5000`.
+
+To run the Vite dev server with hot reload:
+```bash
+cd frontend
+npm run dev
+```
+
+## Testing and Verification
+
+1. **Baseline Calibration Test**:
+   - Power on the ESP32 with the fan running normally.
+   - Observe the `CALIBRATING` status and progress bar on the dashboard.
+   - After 3 minutes, verify the state shifts to `NORMAL` with the green LED solid.
+2. **Mild Imbalance Warning Test**:
+   - Attach a small weight (such as a 10 mm tape strip) to one fan blade.
+   - Observe vibration RMS and rotation frequency band rise.
+   - Verify the yellow LED turns on, state changes to `WARNING`, and the fan keeps running.
+   - Remove the weight and verify automatic recovery to `NORMAL` within 5 windows.
+3. **Critical Safety Latch Test**:
+   - Introduce severe vibration or gently loosen the fan mount.
+   - Verify the state flips to `CRITICAL (LATCHED)`.
+   - Verify the relay cuts fan power immediately, the red LED illuminates, and the buzzer sounds.
+   - Send `{"mode": "on"}` and confirm the command is blocked by the latch.
+   - Remove the disturbance and send `{"reset": true}` to restore normal operation.
+4. **Sensor Fault Test**:
+   - Disconnect the I2C SDA line (GPIO 21).
+   - Verify immediate transition to `SENSOR_ERROR` and red LED indication.
+   - Reconnect the wire and verify automatic recovery.
