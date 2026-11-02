@@ -64,6 +64,102 @@ A low-cost, edge-intelligent predictive maintenance monitor for rotating applian
 | **Red LED** | `GPIO 25` | Indicates CRITICAL (LATCHED) and SENSOR ERROR states (330 ohm resistor). |
 | **Active Buzzer** | `GPIO 27` | Active HIGH. Sounds during CRITICAL state unless muted by command. |
 
+## Dependencies to Download
+
+### 1. Software and Runtimes
+- **Node.js**: Version 18.x or 20.x LTS with npm (download from https://nodejs.org).
+- **Arduino IDE**: Version 2.x or VS Code with Arduino Extension (download from https://www.arduino.cc/en/software).
+- **USB Driver**: CH340 or CP2102 driver (matching your ESP32 board).
+
+### 2. ESP32 Board Package (Arduino IDE)
+1. In Arduino IDE, open **File > Preferences**.
+2. Add this URL to **Additional Boards Manager URLs**:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+3. Open **Tools > Board > Boards Manager**, search for `esp32` by Espressif Systems, and click **Install**.
+
+### 3. Arduino Libraries
+Open **Tools > Manage Libraries** in Arduino IDE and install:
+- `ArduinoJson` (version 6.21.x by Benoit Blanchon)
+- `OneWire` (by Paul Stoffregen)
+- `DallasTemperature` (by Miles Burton)
+- `Adafruit ADS1X15` (by Adafruit, required if current sensor is enabled)
+- `PubSubClient` (by Nick O'Leary)
+
+### 4. Backend Dependencies
+The backend uses standard npm packages defined in `backend/package.json`:
+- `express` (HTTP server and static hosting)
+- `cors` (Cross-origin resource sharing middleware)
+- `serialport` and `@serialport/parser-readline` (USB serial communication with ESP32)
+- `sql.js` (Pure WebAssembly SQLite database engine)
+
+### 5. Frontend Dependencies
+The frontend dashboard uses packages defined in `frontend/package.json`:
+- `react` and `react-dom` (Core UI library)
+- `recharts` (Time series and sensor trend charts)
+- `lucide-react` (Dashboard icons)
+- `vite` and `@vitejs/plugin-react` (Fast build tool and dev server)
+
+## Instructions to Run the Project
+
+Follow these steps to run the complete end-to-end system:
+
+### Step 1: Connect and Flash the ESP32
+1. Connect your ESP32 to your computer using a micro-USB or USB-C data cable.
+2. Open `monitor/monitor.ino` in Arduino IDE.
+3. Select **Tools > Board > ESP32 Arduino > ESP32 Dev Module**.
+4. Select your COM port under **Tools > Port** (for example `COM9` on Windows or `/dev/ttyUSB0` on Linux).
+5. Click **Upload** and wait for upload completion.
+6. Verify in the Serial Monitor (set to 115200 baud) that the board outputs:
+   `{"type":"status","status":"serial_ready","device_id":"fan-01"}`
+7. Close the Serial Monitor so the backend can access the COM port.
+
+### Step 2: Install and Run the Backend Server
+The backend reads serial packets from the ESP32, writes them to SQLite, and provides API endpoints.
+
+On Windows (PowerShell):
+```powershell
+cd backend
+npm install
+$env:SERIAL_PORT="COM9"
+npm start
+```
+
+On Linux or macOS:
+```bash
+cd backend
+npm install
+SERIAL_PORT=/dev/ttyUSB0 npm start
+```
+
+You should see:
+```text
+Database loaded successfully
+Local dashboard API: http://localhost:5000/api/health
+Serial connected: COM9 @ 115200
+```
+
+### Step 3: Install and Build the Frontend Dashboard
+
+Option A: Production Build (Recommended)
+Build the frontend static files once so the Node.js backend serves both the API and dashboard on a single port (5000):
+```bash
+cd frontend
+npm install
+npm run build
+```
+Once built, open `http://localhost:5000` in any web browser.
+
+Option B: Development Mode (Hot Reload)
+To run the React development server with hot reload:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser (it proxies requests to port 5000).
+
 ## Health States and Actuator Behavior
 
 | State | Relay Output | Green LED | Yellow LED | Red LED | Buzzer | Latch Behavior |
@@ -114,55 +210,6 @@ Commands can be sent via HTTP POST to `/api/commands` or written as JSON lines o
 | `{"limit_temp": 65}` | Updates hard temperature limit (deg C) | Stored in NVS. Clamped between 35 and 90 deg C. |
 | `{"limit_vib": 5.0}` | Updates hard vibration limit (m/s2) | Stored in NVS. Clamped between 1.0 and 15.0 m/s2. |
 | `{"mute_buzzer": true}` | Silences active buzzer | Keeps relay cutoff and red LED alarm active. |
-
-## Getting Started
-
-### 1. Flash the ESP32 Firmware
-1. Open `monitor/monitor.ino` in Arduino IDE or VS Code with ESP32 board support installed.
-2. Select target board: `ESP32 Dev Module`.
-3. Ensure required libraries are installed:
-   - `ArduinoJson` (v6)
-   - `OneWire`
-   - `DallasTemperature`
-   - `Adafruit ADS1X15` (if using ADS1115 current sensor)
-   - `arduinoFFT`
-4. Connect the ESP32 via USB and upload the sketch.
-
-### 2. Run the Offline Backend
-The backend connects to the ESP32 over USB Serial, persists telemetry into SQLite, and hosts the API and dashboard.
-
-```bash
-cd backend
-npm install
-# Set SERIAL_PORT if different from COM8 (for example: COM9 on Windows or /dev/ttyUSB0 on Linux)
-SERIAL_PORT=COM9 npm start
-```
-
-On Windows PowerShell:
-```powershell
-cd backend
-$env:SERIAL_PORT="COM9"
-npm start
-```
-
-Health check endpoint: `http://localhost:5000/api/health`
-
-### 3. Build and View the Frontend Dashboard
-The frontend is built with React, Vite, Recharts, and Lucide Icons.
-
-```bash
-cd frontend
-npm install
-npm run build
-```
-
-The built frontend files in `frontend/dist` are served directly by the backend at `http://localhost:5000`.
-
-To run the Vite dev server with hot reload:
-```bash
-cd frontend
-npm run dev
-```
 
 ## Testing and Verification
 
